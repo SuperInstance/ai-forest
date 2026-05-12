@@ -113,6 +113,20 @@ def cmd_bench(args):
         dt = time.time() - t0
         print(f"  Gradient {n}: {dt*1000:.3f}ms ({n/dt/1e6:.0f}M elem/sec)")
 
+def cmd_zig(args):
+    """Benchmark Zig compute path"""
+    import time, ctypes
+    lib = ctypes.CDLL("/tmp/ai-forest/zig/libft_zig.so")
+    lib.ft_contract.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.c_int32]
+    lib.ft_contract.restype = ctypes.c_int32
+    for n in [1000, 5000]:
+        a = (ctypes.c_int32 * n)(); b = (ctypes.c_int32 * n)()
+        for i in range(n): a[i] = i * 1000; b[i] = i * 1000 + 500
+        t0 = time.time()
+        nr = lib.ft_contract(a, n, b, n, 10000)
+        dt = time.time() - t0
+        print(f"  Zig contract {n}x{n}: {dt*1000:.1f}ms ({n*n/dt/1e6:.0f}M pairs/sec)")
+
 COMMANDS = {k.replace("cmd_",""): v for k,v in locals().items() if k.startswith("cmd_")}
 
 if __name__ == "__main__":
