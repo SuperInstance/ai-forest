@@ -1,0 +1,12 @@
+# AI Forest Mycelium Bridge — Dependencies
+#
+# The bridge uses only Python standard library modules.
+# No third-party packages required.
+#
+# Python 3.8+ is recommended.
+#
+# To verify PLATO connectivity, you need curl (not a Python dep):
+#   curl http://localhost:8847/
+#
+# To run the bridge:
+#   python3 bridge.py --port 4080

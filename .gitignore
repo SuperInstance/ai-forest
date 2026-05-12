@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.o
+micro-agent
+floor
+floor/micro/micro-agent
+__pycache__/
+*.pyc
+*.egg-info/
