@@ -1172,6 +1172,54 @@ def cmd_recall(args):
         print("Error: {}".format(e))
 
 
+def cmd_recall_agent(args):
+    """Start a recall agent loop for a room.
+    Every cycle: read tiles, reconstruct them, write reconstructions back.
+    The room accumulates interpretations over time.
+    
+    Usage: ft recall-agent <room> [interval_sec]"""
+    if not args:
+        return print("Usage: ft recall-agent <room> [interval_sec]")
+    room = args[0]
+    interval = int(args[1]) if len(args) > 1 else 30
+    import time
+    cycle = 0
+    print("Recall agent watching {}/ every {}s...".format(room, interval))
+    print("Every cycle reads N tiles, reconstructs them, writes back.")
+    print("The room accumulates interpretations, not just originals.")
+    while True:
+        cycle += 1
+        print("\n[Cycle {}] Recalling {}/...".format(cycle, room))
+        try:
+            import urllib.request, json, random
+            resp = json.loads(urllib.request.urlopen(
+                _CONF.plato_url + "/room/{0}?limit=5".format(room), timeout=10).read())
+            tiles = resp.get("tiles", [])[:5]
+            written = 0
+            for i, t in enumerate(tiles):
+                age = random.uniform(0, 2)
+                weight = 1.0 / (1.0 + age)
+                conf = t.get("confidence", 0.5)
+                recon_conf = min(1.0, conf * (0.8 + 0.2 * weight))
+                data = json.dumps({
+                    "room": room,
+                    "question": "recall cycle {}: {}".format(cycle, t.get("question", "")[:50]),
+                    "answer": "[Cycle {} weight={:.3f}] {}".format(cycle, weight, t.get("answer", "")[:150]),
+                    "source": "recall-agent",
+                    "confidence": recon_conf,
+                }).encode()
+                req = urllib.request.Request(
+                    _CONF.plato_url + "/room/{}/submit".format(room),
+                    data=data, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    if json.loads(r.read()).get("status") == "accepted":
+                        written += 1
+            print("  Reconstructed {}/{} tiles".format(written, len(tiles)))
+        except Exception as e:
+            print("  Error: {}".format(e))
+        time.sleep(interval)
+
+
 _COMMANDS: Dict[str, Dict[str, Any]] = {
     "plato": {"fn": cmd_plato, "doc": "Server status"},
     "physics": {"fn": cmd_physics, "doc": "Compute claw physics"},
@@ -1232,49 +1280,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-def cmd_recall_agent(args):
-    """Start a recall agent loop for a room.
-    Every cycle: read tiles, reconstruct them, write reconstructions back.
-    The room accumulates interpretations over time.
-    
-    Usage: ft recall-agent <room> [interval_sec]"""
-    if not args:
-        return print("Usage: ft recall-agent <room> [interval_sec]")
-    room = args[0]
-    interval = int(args[1]) if len(args) > 1 else 30
-    import time
-    cycle = 0
-    print("Recall agent watching {}/ every {}s...".format(room, interval))
-    print("Every cycle reads N tiles, reconstructs them, writes back.")
-    print("The room accumulates interpretations, not just originals.")
-    while True:
-        cycle += 1
-        print("\n[Cycle {}] Recalling {}/...".format(cycle, room))
-        try:
-            import urllib.request, json, random
-            resp = json.loads(urllib.request.urlopen(
-                _CONF.plato_url + "/room/{0}?limit=5".format(room), timeout=10).read())
-            tiles = resp.get("tiles", [])[:5]
-            written = 0
-            for i, t in enumerate(tiles):
-                age = random.uniform(0, 2)
-                weight = 1.0 / (1.0 + age)
-                conf = t.get("confidence", 0.5)
-                recon_conf = min(1.0, conf * (0.8 + 0.2 * weight))
-                data = json.dumps({
-                    "room": room,
-                    "question": "recall cycle {}: {}".format(cycle, t.get("question", "")[:50]),
-                    "answer": "[Cycle {} weight={:.3f}] {}".format(cycle, weight, t.get("answer", "")[:150]),
-                    "source": "recall-agent",
-                    "confidence": recon_conf,
-                }).encode()
-                req = urllib.request.Request(
-                    _CONF.plato_url + "/room/{}/submit".format(room),
-                    data=data, headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    if json.loads(r.read()).get("status") == "accepted":
-                        written += 1
-            print("  Reconstructed {}/{} tiles".format(written, len(tiles)))
-        except Exception as e:
-            print("  Error: {}".format(e))
-        time.sleep(interval)
