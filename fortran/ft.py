@@ -1,268 +1,132 @@
 #!/usr/bin/env python3
-"""ft — PLATO compute toolkit. Native int32, no bit packing.
+"""ft — PLATO compute toolkit. Native int32 array operations.
 
-Built on Fortran native array operations + PLATO rooms.
+A production-quality CLI for PLATO room operations backed by Fortran
+native array operations and an optional Zig bridge layer.
 
-SYNOPSIS
-    ft plato                            — PLATO server status
-    ft physics                          — Compute claw physics (latency, flops, SIMD)
-    ft cat <room>                       — Read and display tiles from a room
-    ft canon <room> [N]                 — Top N highest-confidence tiles
-    ft contract <room_a> <room_b> [thr] — Contract two room tile sets through Fortran claw
-    ft gradient <room>                  — Gradient across room tile history
-    ft spline <room> <mu>               — Interpolate room state (mu: 0-1023)
-    ft watch <room> [interval]          — Watch a room for new tiles (poll every N sec)
-    ft benchmarks                       — Run benchmarks (Fortran direct + Zig ABI)
-    ft help                             — This help text
+Usage:
+    ft plato                    Server status
+    ft physics                  Compute claw physics (latency, flops, SIMD)
+    ft cat <room>               Read room tiles
+    ft canon <room> [N]         Top N highest-confidence tiles
+    ft contract <a> <b> [t]     Contract two rooms through Fortran claw
+    ft gradient <room>          Gradient across tile history
+    ft spline <room> <mu>       Interpolate room state (mu: 0-1023)
+    ft watch <room> [i]         Watch room for new tiles (poll every i sec)
+    ft bench                    Run all benchmarks (Fortran + Zig)
+    ft zig                      Run Zig-specific benchmarks
+    ft window-contract <a> <b> <w> [t]  Temporal contract with time window
+    ft recency-dot <room>       Recency-weighted dot product
+    ft window-gradient <r> [w]  Smoothed gradient over sliding window
+    ft help                     Comprehensive help text
 
-COMMANDS
-    plato
-        Fetches GET /status from PLATO and displays:
-          • Total rooms and tile count
-          • Gate stats (accepted / rejected / top rejection reasons)  
-          • Room-by-room breakdown with tile counts and creation dates
+Environment:
+    PLATO_URL  PLATO server base URL (default: http://localhost:8847)
+    CLAW_URL   Compute claw base URL (default: http://localhost:4081)
 
-    physics
-        Fetches GET /physics from the compute claw and shows:
-          • Latency (ns)
-          • FLOPs (floating-point ops/sec)
-          • SIMD bit-width
-
-    cat <room>
-        Fetches tiles from GET /room/{name}?limit=50.
-        Displays each tile as a table row with:
-          • Index
-          • Confidence (color-coded: green ≥0.9, yellow ≥0.7, red <0.7)
-          • Source abbreviation
-          • Question text (truncated to fit terminal)
-
-    canon <room> [N]
-        Fetches tiles from GET /room/{name}?limit=200.
-        Sorts by confidence (descending) and shows top N (default: 10).
-        Color-codes confidence values.
-
-    contract <room_a> <room_b> [threshold]
-        Reads all tile IDs from both PLATO rooms (limit=200 each).
-        Posts to CLAW /contract with JSON body:
-          {"room_a": [int32...], "room_b": [int32...],
-           "na": N, "nb": N, "threshold": T}
-        Displays result count and first 10 result values.
-
-    gradient <room>
-        Fetches tiles from GET /room/{name}?limit=100.
-        Extracts a signed hash from each question.
-        Posts to CLAW /gradient.
-        Displays first 10 gradient deltas with corresponding question text.
-
-    spline <room> <mu>
-        Fetches tiles from GET /room/{name}?limit=50.
-        Posts to CLAW /spline with before/after arrays and mu (0-1023).
-        Displays number of result elements.
-
-    watch <room> [interval]
-        Polls PLATO every N seconds (default: 10) for GET /room/{name}.
-        Prints new tiles as they appear.
-        Runs until Ctrl+C. Tracks seen tile hashes to detect duplicates.
-
-    benchmarks
-        Loads the native compute libraries (Fortran libplato_math.so,
-        Zig libft_zig.so) and runs:
-          • Contract benchmarks (1K×1K, 5K×5K) — pairs/sec
-          • Gradient benchmarks (10K, 100K elements) — elements/sec
-          • Zig contract benchmark (1K×1K, 5K×5K) — pairs/sec
-        Searches /usr/local/lib/ first, then /tmp/ai-forest/fortran/.
-
-    help
-        Prints this documentation.
-
-ENVIRONMENT
-    PLATO_URL     PLATO server (default: http://localhost:8847)
-    CLAW_URL      Compute claw (default: http://localhost:4081)
-
-EXIT CODES
+Exit codes:
     0  Success
     1  Usage error (missing arguments, unknown command)
-    2  Network error (PLATO or CLAW unreachable)
-    3  Library error (native .so not found)
+    2  Network error (PLATO/CLAW unreachable or malformed response)
+    3  Library error (native .so not found or load failure)
 """
 
+from __future__ import annotations
+
 import ctypes
+import errno
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-PLATO = os.environ.get("PLATO_URL", "http://localhost:8847")
-CLAW = os.environ.get("CLAW_URL", "http://localhost:4081")
+# ─── ANSI color constants ─────────────────────────────────────────────────
+_GREEN = "\033[92m"
+_YELLOW = "\033[93m"
+_RED = "\033[91m"
+_CYAN = "\033[96m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
 
-# ─── ANSI color codes ────────────────────────────────────────────────
-_COLORS = {
-    "GREEN": "\033[92m",
-    "YELLOW": "\033[93m",
-    "RED": "\033[91m",
-    "CYAN": "\033[96m",
-    "BOLD": "\033[1m",
-    "DIM": "\033[2m",
-    "RESET": "\033[0m",
-}
 
-def _color_confidence(conf):
-    """Return green/yellow/red ANSI code for a confidence value."""
+def _color(text: str, ansi: str) -> str:
+    return f"{ansi}{text}{_RESET}"
+
+
+def green(text: str) -> str:
+    return _color(text, _GREEN)
+
+
+def yellow(text: str) -> str:
+    return _color(text, _YELLOW)
+
+
+def red(text: str) -> str:
+    return _color(text, _RED)
+
+
+def cyan(text: str) -> str:
+    return _color(text, _CYAN)
+
+
+def bold(text: str) -> str:
+    return _color(text, _BOLD)
+
+
+def dim(text: str) -> str:
+    return _color(text, _DIM)
+
+
+def confidence_color(conf: float) -> str:
+    """Return green/yellow/red based on confidence threshold."""
     if conf >= 0.9:
-        return _COLORS["GREEN"]
-    elif conf >= 0.7:
-        return _COLORS["YELLOW"]
-    return _COLORS["RED"]
+        return _GREEN
+    if conf >= 0.7:
+        return _YELLOW
+    return _RED
 
-def _colorize(text, color):
-    """Wrap text in ANSI color, resetting afterward."""
-    return f"{_COLORS[color]}{text}{_COLORS['RESET']}"
 
-def _bold(text):
-    return f"{_COLORS['BOLD']}{text}{_COLORS['RESET']}"
+# ─── Configuration ──────────────────────────────────────────────────────────
 
-def _dim(text):
-    return f"{_COLORS['DIM']}{text}{_COLORS['RESET']}"
+@dataclass
+class Config:
+    """Global configuration loaded from environment."""
+    plato_url: str = field(default_factory=lambda: os.environ.get("PLATO_URL", "http://localhost:8847"))
+    claw_url: str = field(default_factory=lambda: os.environ.get("CLAW_URL", "http://localhost:4081"))
+    http_timeout: int = 10
+    claw_timeout: int = 30
+    bench_library_paths: Tuple[str, ...] = (
+        "/usr/local/lib",
+        "/tmp/ai-forest/fortran",
+        "/tmp/ai-forest/zig",
+    )
 
-# ─── Network helpers ─────────────────────────────────────────────────
 
-def _fetch(path, timeout=10):
-    """JSON GET from PLATO. Returns dict or raises on error."""
+_CONF = Config()
+
+
+# ─── Terminal helpers ──────────────────────────────────────────────────────
+
+def _terminal_width(fallback: int = 100) -> int:
     try:
-        with urllib.request.urlopen(f"{PLATO}{path}", timeout=timeout) as r:
-            return json.loads(r.read())
-    except urllib.error.URLError as e:
-        print(f"Error: cannot reach PLATO at {PLATO}: {e.reason}", file=sys.stderr)
-        sys.exit(2)
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON from PLATO: {e}", file=sys.stderr)
-        sys.exit(2)
-    except Exception as e:
-        print(f"Error: PLATO request failed: {e}", file=sys.stderr)
-        sys.exit(2)
+        return shutil.get_terminal_size((fallback, 24)).columns
+    except Exception:
+        return fallback
 
 
-def _fetch_room(room, limit=50):
-    """Fetch tiles from a PLATO room. Returns list of tiles."""
-    data = _fetch(f"/room/{room}?limit={limit}")
-    tiles = data.get("tiles", [])
-    if not tiles:
-        print(f"Info: room '{room}' has no tiles or does not exist", file=sys.stderr)
-    return tiles
-
-
-def _claw_post(endpoint, data, timeout=30):
-    """JSON POST to CLAW. Returns dict or raises on error."""
-    try:
-        body = json.dumps(data).encode()
-        req = urllib.request.Request(
-            f"{CLAW}{endpoint}",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except urllib.error.URLError as e:
-        print(f"Error: cannot reach CLAW at {CLAW}: {e.reason}", file=sys.stderr)
-        sys.exit(2)
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON from CLAW: {e}", file=sys.stderr)
-        sys.exit(2)
-    except Exception as e:
-        print(f"Error: CLAW request failed: {e}", file=sys.stderr)
-        sys.exit(2)
-
-
-# ─── Library helpers ─────────────────────────────────────────────────
-
-def _find_lib(name):
-    """Find a shared library. Checks /usr/local/lib/ first, then fallback."""
-    paths = [
-        f"/usr/local/lib/{name}",
-        f"/tmp/ai-forest/fortran/{name}",
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            return p
-    return None
-
-
-def _load_libs():
-    """Load Fortran and Zig libraries. Exits with code 3 if not found."""
-    fortran_path = _find_lib("libplato_math.so")
-    zig_path = _find_lib("libft_zig.so")
-
-    if not fortran_path:
-        print("Error: libplato_math.so not found in /usr/local/lib/ or /tmp/ai-forest/fortran/",
-              file=sys.stderr)
-        sys.exit(3)
-
-    lib_f = ctypes.CDLL(fortran_path)
-    lib_z = None
-    if zig_path:
-        lib_z = ctypes.CDLL(zig_path)
-        lib_z.ft_contract.argtypes = [
-            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
-            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
-            ctypes.c_int32,
-        ]
-        lib_z.ft_contract.restype = ctypes.c_int32
-
-    return lib_f, lib_z
-
-
-# ─── Commands ────────────────────────────────────────────────────────
-
-def cmd_plato(args):
-    """PLATO server status: rooms, tiles, gate stats."""
-    s = _fetch("/status")
-    rooms = s.get("rooms", {})
-    gate = s.get("gate_stats", {})
-
-    if not rooms:
-        print("PLATO status: active, no rooms yet")
-        return
-
-    total_tiles = sum(r.get("tile_count", 0) for r in rooms.values())
-    print(f"{_bold('PLATO Status')}")
-    print(f"  Version:  {s.get('version', 'unknown')}")
-    print(f"  Uptime:   {_format_uptime(s.get('uptime', 0))}")
-    print(f"  Rooms:    {len(rooms)}")
-    print(f"  Tiles:    {total_tiles}")
-    print()
-
-    if gate:
-        accepted = gate.get("accepted", 0)
-        rejected = gate.get("rejected", 0)
-        print(f"{_bold('Gate Stats')}")
-        print(f"  Accepted: {accepted}")
-        print(f"  Rejected: {rejected}")
-        reasons = gate.get("reasons", {})
-        if reasons:
-            print(f"  Top rejection reasons:")
-            for reason, count in sorted(reasons.items(), key=lambda x: -x[1])[:5]:
-                print(f"    • {reason}: {count}")
-        print()
-
-    # Room list with tile counts
-    print(f"{_bold('Rooms')}")
-    by_tiles = sorted(rooms.items(), key=lambda kv: -kv[1].get("tile_count", 0))
-    header = f"  {'ROOM':<30} {'TILES':>6} {'CREATED':<20}"
-    print(header)
-    print(f"  {'-'*30} {'-'*6} {'-'*20}")
-    for name, info in by_tiles:
-        tc = info.get("tile_count", 0)
-        created = info.get("created", "?")[:19]
-        print(f"  {name:<30} {tc:>6} {created:<20}")
-
-
-def _format_uptime(seconds):
-    """Format uptime seconds into human-readable string."""
-    seconds = int(time.time() - seconds) if seconds > 1e10 else int(seconds)
-    days, rem = divmod(seconds, 86400)
+def _format_uptime(seconds: float) -> str:
+    """Format an uptime delta (seconds or Unix timestamp) as human-readable."""
+    secs = int(seconds)
+    # If it looks like a Unix timestamp (> 1e10), compute delta from now
+    if seconds > 1e10:
+        secs = int(time.time() - seconds)
+    days, rem = divmod(secs, 86400)
     hours, rem = divmod(rem, 3600)
     mins, secs = divmod(rem, 60)
     parts = []
@@ -270,82 +134,490 @@ def _format_uptime(seconds):
         parts.append(f"{days}d")
     if hours:
         parts.append(f"{hours}h")
-    parts.append(f"{mins}m")
+    if mins:
+        parts.append(f"{mins}m")
     parts.append(f"{secs}s")
     return " ".join(parts)
 
 
-def cmd_physics(args):
-    """Compute claw physics: latency, flops, SIMD."""
+# ─── PlatoClient ────────────────────────────────────────────────────────────
+
+class PlatoClient:
+    """HTTP client for PLATO server interactions."""
+
+    def __init__(self, base_url: str, timeout: int = 10) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def _url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
+
+    def get_json(self, path: str, *, label: str = "PLATO") -> Any:
+        """GET a JSON resource from PLATO. Exits on network/parse error."""
+        url = self._url(path)
+        try:
+            with urllib.request.urlopen(url, timeout=self.timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.URLError as e:
+            print(f"{red('Error')}: cannot reach {label} at {url}: {e.reason}", file=sys.stderr)
+            sys.exit(2)
+        except json.JSONDecodeError as e:
+            print(f"{red('Error')}: invalid JSON from {label}: {e}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as e:
+            print(f"{red('Error')}: {label} request failed: {e}", file=sys.stderr)
+            sys.exit(2)
+
+    def fetch_status(self) -> Dict[str, Any]:
+        return self.get_json("/status")
+
+    def fetch_room(self, name: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetch tiles from a PLATO room. Returns empty list on missing room."""
+        data = self.get_json(f"/room/{name}?limit={limit}")
+        tiles: List[Dict[str, Any]] = data.get("tiles", [])
+        return tiles
+
+
+# ─── ComputeClaw (Native Fortran/Zig) ─────────────────────────────────────
+
+class _FortranLib:
+    """Wrapper around ctypes-loaded Fortran/C shared library."""
+
+    def __init__(self, lib: ctypes.CDLL) -> None:
+        self._lib = lib
+        self._setup_prototypes()
+
+    def _setup_prototypes(self) -> None:
+        L = self._lib
+        # contract(a, na, b, nb, threshold, &nresult)
+        L.contract.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.contract.restype = None
+
+        # dot(a, b, n, &result)
+        L.dot.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32, ctypes.POINTER(ctypes.c_int64),
+        ]
+        L.dot.restype = None
+
+        # spline(before, after, n, mu, result)
+        L.spline.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32, ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.spline.restype = None
+
+        # gradient(arr, n, result)
+        L.gradient.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.gradient.restype = None
+
+        # physics(&latency_ns, &flops, &simd_bits)
+        L.physics.argtypes = [
+            ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.physics.restype = None
+
+        # filter_val(arr, n, target, tolerance, indices, &n_found)
+        L.filter_val.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.filter_val.restype = None
+
+        # window_contract(time_a, a, na, time_b, b, nb, window, threshold, &nresult)
+        L.window_contract.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.window_contract.restype = None
+
+        # recency_dot(a, time_a, b, time_b, n, &result)
+        L.recency_dot.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32, ctypes.POINTER(ctypes.c_int64),
+        ]
+        L.recency_dot.restype = None
+
+        # window_gradient(arr, n, window, result)
+        L.window_gradient.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.window_gradient.restype = None
+
+    def contract(
+        self,
+        a: Sequence[int], na: int,
+        b: Sequence[int], nb: int,
+        threshold: int,
+    ) -> int:
+        arr_a = (ctypes.c_int32 * na)(*a)
+        arr_b = (ctypes.c_int32 * nb)(*b)
+        nresult = ctypes.c_int32(0)
+        self._lib.contract(arr_a, na, arr_b, nb, threshold, ctypes.byref(nresult))
+        return nresult.value
+
+    def dot(self, a: Sequence[int], b: Sequence[int], n: int) -> int:
+        arr_a = (ctypes.c_int32 * n)(*a)
+        arr_b = (ctypes.c_int32 * n)(*b)
+        result = ctypes.c_int64(0)
+        self._lib.dot(arr_a, arr_b, n, ctypes.byref(result))
+        return result.value
+
+    def gradient(self, arr: Sequence[int], n: int) -> List[int]:
+        arr_in = (ctypes.c_int32 * n)(*arr)
+        result = (ctypes.c_int32 * n)()
+        self._lib.gradient(arr_in, n, result)
+        return [result[i] for i in range(n)]
+
+    def spline(self, before: Sequence[int], after: Sequence[int],
+               n: int, mu: int) -> List[int]:
+        arr_before = (ctypes.c_int32 * n)(*before)
+        arr_after = (ctypes.c_int32 * n)(*after)
+        result = (ctypes.c_int32 * n)()
+        self._lib.spline(arr_before, arr_after, n, mu, result)
+        return [result[i] for i in range(n)]
+
+    def physics(self) -> Tuple[float, float, int]:
+        lat = ctypes.c_float(0.0)
+        flops = ctypes.c_float(0.0)
+        simd = ctypes.c_int32(0)
+        self._lib.physics(ctypes.byref(lat), ctypes.byref(flops), ctypes.byref(simd))
+        return (lat.value, flops.value, simd.value)
+
+    def window_contract(
+        self,
+        time_a: Sequence[int], a: Sequence[int], na: int,
+        time_b: Sequence[int], b: Sequence[int], nb: int,
+        window: int, threshold: int,
+    ) -> int:
+        arr_ta = (ctypes.c_int32 * na)(*time_a)
+        arr_a = (ctypes.c_int32 * na)(*a)
+        arr_tb = (ctypes.c_int32 * nb)(*time_b)
+        arr_b = (ctypes.c_int32 * nb)(*b)
+        nresult = ctypes.c_int32(0)
+        self._lib.window_contract(
+            arr_ta, arr_a, na, arr_tb, arr_b, nb,
+            window, threshold, ctypes.byref(nresult),
+        )
+        return nresult.value
+
+    def recency_dot(
+        self, a: Sequence[int], time_a: Sequence[int],
+        b: Sequence[int], time_b: Sequence[int], n: int,
+    ) -> int:
+        arr_a = (ctypes.c_int32 * n)(*a)
+        arr_ta = (ctypes.c_int32 * n)(*time_a)
+        arr_b = (ctypes.c_int32 * n)(*b)
+        arr_tb = (ctypes.c_int32 * n)(*time_b)
+        result = ctypes.c_int64(0)
+        self._lib.recency_dot(arr_a, arr_ta, arr_b, arr_tb, n, ctypes.byref(result))
+        return result.value
+
+    def window_gradient(self, arr: Sequence[int], n: int, window: int) -> List[int]:
+        arr_in = (ctypes.c_int32 * n)(*arr)
+        result = (ctypes.c_int32 * n)()
+        self._lib.window_gradient(arr_in, n, window, result)
+        return [result[i] for i in range(n)]
+
+
+class _ZigLib:
+    """Wrapper around ctypes-loaded Zig shared library (libft_zig.so)."""
+
+    def __init__(self, lib: ctypes.CDLL) -> None:
+        self._lib = lib
+        self._setup_prototypes()
+
+    def _setup_prototypes(self) -> None:
+        L = self._lib
+        # ft_contract(a_ptr, a_len, b_ptr, b_len, threshold) -> i32
+        L.ft_contract.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32,
+        ]
+        L.ft_contract.restype = ctypes.c_int32
+
+        # ft_dot(a_ptr, b_ptr, n) -> i64
+        L.ft_dot.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32,
+        ]
+        L.ft_dot.restype = ctypes.c_int64
+
+        # ft_physics(&lat, &flops, &simd)
+        L.ft_physics.argtypes = [
+            ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.ft_physics.restype = None
+
+        # ft_window_contract(...)
+        L.ft_window_contract.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.c_int32,
+        ]
+        L.ft_window_contract.restype = ctypes.c_int32
+
+        # ft_recency_dot(...) -> i64
+        L.ft_recency_dot.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32,
+        ]
+        L.ft_recency_dot.restype = ctypes.c_int64
+
+        # ft_window_gradient(arr, n, window, result)
+        L.ft_window_gradient.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+            ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
+        ]
+        L.ft_window_gradient.restype = None
+
+    def contract(self, a: Sequence[int], na: int,
+                  b: Sequence[int], nb: int,
+                  threshold: int) -> int:
+        arr_a = (ctypes.c_int32 * na)(*a)
+        arr_b = (ctypes.c_int32 * nb)(*b)
+        return self._lib.ft_contract(arr_a, na, arr_b, nb, threshold)
+
+    def dot(self, a: Sequence[int], b: Sequence[int], n: int) -> int:
+        arr_a = (ctypes.c_int32 * n)(*a)
+        arr_b = (ctypes.c_int32 * n)(*b)
+        return self._lib.ft_dot(arr_a, arr_b, n)
+
+    def physics(self) -> Tuple[float, float, int]:
+        lat = ctypes.c_float(0.0)
+        flops = ctypes.c_float(0.0)
+        simd = ctypes.c_int32(0)
+        self._lib.ft_physics(ctypes.byref(lat), ctypes.byref(flops), ctypes.byref(simd))
+        return (lat.value, flops.value, simd.value)
+
+    def window_contract(
+        self,
+        time_a: Sequence[int], a: Sequence[int], na: int,
+        time_b: Sequence[int], b: Sequence[int], nb: int,
+        window: int, threshold: int,
+    ) -> int:
+        arr_ta = (ctypes.c_int32 * na)(*time_a)
+        arr_a = (ctypes.c_int32 * na)(*a)
+        arr_tb = (ctypes.c_int32 * nb)(*time_b)
+        arr_b = (ctypes.c_int32 * nb)(*b)
+        return self._lib.ft_window_contract(
+            arr_ta, arr_a, na, arr_tb, arr_b, nb, window, threshold,
+        )
+
+    def recency_dot(
+        self, a: Sequence[int], time_a: Sequence[int],
+        b: Sequence[int], time_b: Sequence[int], n: int,
+    ) -> int:
+        arr_a = (ctypes.c_int32 * n)(*a)
+        arr_ta = (ctypes.c_int32 * n)(*time_a)
+        arr_b = (ctypes.c_int32 * n)(*b)
+        arr_tb = (ctypes.c_int32 * n)(*time_b)
+        return self._lib.ft_recency_dot(arr_a, arr_ta, arr_b, arr_tb, n)
+
+    def window_gradient(self, arr: Sequence[int], n: int, window: int) -> List[int]:
+        arr_in = (ctypes.c_int32 * n)(*arr)
+        result = (ctypes.c_int32 * n)()
+        self._lib.ft_window_gradient(arr_in, n, window, result)
+        return [result[i] for i in range(n)]
+
+
+class ComputeClaw:
+    """Interface to native Fortran and Zig compute libraries.
+
+    Loads libplato_math.so (Fortran) and libft_zig.so (Zig bridge) from
+    standard paths. All operations are pure int32 array calls.
+    """
+
+    def __init__(self) -> None:
+        self.fortran: _FortranLib
+        self.zig: Optional[_ZigLib] = None
+        self._load()
+
+    def _find_lib(self, name: str) -> Optional[str]:
+        for d in _CONF.bench_library_paths:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
+        return None
+
+    def _load(self) -> None:
+        f_path = self._find_lib("libplato_math.so")
+        if not f_path:
+            print(f"{red('Error')}: libplato_math.so not found in search paths: "
+                  f"{', '.join(_CONF.bench_library_paths)}", file=sys.stderr)
+            sys.exit(3)
+        try:
+            self.fortran = _FortranLib(ctypes.CDLL(f_path))
+        except OSError as e:
+            print(f"{red('Error')}: cannot load {f_path}: {e}", file=sys.stderr)
+            sys.exit(3)
+
+        z_path = self._find_lib("libft_zig.so")
+        if z_path:
+            try:
+                self.zig = _ZigLib(ctypes.CDLL(z_path))
+            except OSError:
+                self.zig = None
+
+
+# ─── Utility: hash extraction ─────────────────────────────────────────────
+
+def _tile_hash(tile: Dict[str, Any]) -> int:
+    """Extract a deterministic int32 from a tile for compute operations."""
+    raw = tile.get("_hash", "0")[:8]
     try:
-        with urllib.request.urlopen(f"{CLAW}/physics", timeout=5) as r:
-            p = json.loads(r.read())
-    except urllib.error.URLError:
-        print(f"Error: cannot reach compute claw at {CLAW}", file=sys.stderr)
+        return int(raw, 16) % 0x7FFFFFFF
+    except ValueError:
+        return 0
+
+
+def _question_hash(tile: Dict[str, Any]) -> int:
+    """Hash the question text to an int32 for compute ops."""
+    q = (tile.get("question", "") or "").strip()
+    return hash(q[:32]) & 0x7FFFFFFF
+
+
+# ─── CLAW HTTP helpers ────────────────────────────────────────────────────
+
+def _claw_post(endpoint: str, data: Dict[str, Any]) -> Any:
+    """JSON POST to the compute claw HTTP server."""
+    url = f"{_CONF.claw_url}{endpoint}"
+    try:
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_CONF.claw_timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.URLError as e:
+        print(f"{red('Error')}: cannot reach compute claw at {url}: {e.reason}",
+              file=sys.stderr)
+        sys.exit(2)
+    except json.JSONDecodeError as e:
+        print(f"{red('Error')}: invalid JSON from compute claw: {e}", file=sys.stderr)
         sys.exit(2)
     except Exception as e:
-        print(f"Error: physics check failed: {e}", file=sys.stderr)
+        print(f"{red('Error')}: compute claw request failed: {e}", file=sys.stderr)
         sys.exit(2)
 
-    latency = p.get("latency_ns", 0)
-    flops = p.get("flops", 0)
-    simd = p.get("simd_bits", 0)
 
-    print(f"{_bold('Compute Claw Physics')}")
-    print(f"  Latency:   {_colorize(f'{latency:.1f} ns', 'GREEN')}")
-    print(f"  FLOPs:     {flops:.2e}")
-    print(f"  SIMD:      {_colorize(f'{simd}-bit', 'CYAN')}")
+# ─── CLI Commands ──────────────────────────────────────────────────────────
+
+def cmd_plato(_args: List[str]) -> None:
+    """Server status: rooms, tiles, gate statistics."""
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    status = client.fetch_status()
+
+    rooms = status.get("rooms", {})
+    gate = status.get("gate_stats", {})
+    total_tiles = sum(r.get("tile_count", 0) for r in rooms.values())
+
+    print(f"{bold('PLATO Server Status')}")
+    print(f"  Version:  {status.get('version', 'unknown')}")
+    print(f"  Uptime:   {_format_uptime(status.get('uptime', 0))}")
+    print(f"  Rooms:    {len(rooms)}")
+    print(f"  Tiles:    {total_tiles}")
+
+    if gate:
+        acc = gate.get("accepted", 0)
+        rej = gate.get("rejected", 0)
+        print()
+        print(f"{bold('Gate Stats')}")
+        print(f"  Accepted:  {green(str(acc))}")
+        print(f"  Rejected:  {red(str(rej)) if rej > 0 else str(rej)}")
+        reasons = gate.get("reasons", {})
+        if reasons:
+            print(f"  Top reasons:")
+            for reason, count in sorted(reasons.items(), key=lambda x: -x[1])[:5]:
+                print(f"    • {reason}: {count}")
+
+    if rooms:
+        print()
+        print(f"{bold('Rooms')}")
+        sorted_rooms = sorted(rooms.items(), key=lambda kv: -kv[1].get("tile_count", 0))
+        header = f"  {'NAME':<30} {'TILES':>6}  {'CREATED':<20}"
+        print(header)
+        print(f"  {'-'*30} {'-'*6}  {'-'*20}")
+        for name, info in sorted_rooms:
+            tc = info.get("tile_count", 0)
+            created = (info.get("created", "") or "")[:19]
+            print(f"  {name:<30} {tc:>6}  {created:<20}")
 
 
-def cmd_cat(args):
+def cmd_physics(_args: List[str]) -> None:
+    """Compute claw physics: latency, FLOPs, SIMD width."""
+    # Try HTTP claw first, fall back to native Fortran
+    try:
+        with urllib.request.urlopen(f"{_CONF.claw_url}/physics", timeout=5) as r:
+            p = json.loads(r.read())
+        lat = p.get("latency_ns", 0)
+        flops = p.get("flops", 0)
+        simd = p.get("simd_bits", 0)
+        print(f"{bold('Compute Claw Physics (HTTP)')}")
+    except Exception:
+        claw = ComputeClaw()
+        lat, flops, simd = claw.fortran.physics()
+        print(f"{bold('Compute Claw Physics (Native)')}")
+
+    print(f"  Latency:  {green(f'{lat:.1f} ns')}")
+    print(f"  FLOPs:    {flops:.2e}")
+    print(f"  SIMD:     {cyan(f'{simd}-bit')}")
+
+
+def cmd_cat(args: List[str]) -> None:
     """Read and display tiles from a room with confidence colors."""
     if not args:
-        print("Usage: ft cat <room>", file=sys.stderr)
+        print(f"Usage: ft cat <room>", file=sys.stderr)
         sys.exit(1)
 
     room = args[0]
-    tiles = _fetch_room(room, limit=50)
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=50)
 
     if not tiles:
+        print(f"{yellow('Info')}: room '{room}' has no tiles or does not exist", file=sys.stderr)
         return
 
-    # Terminal-width safe: question column fills remaining space
-    # Format: [idx] conf  source  question
-    conf_w = 5  # "0.000"
+    tw = _terminal_width()
     src_w = 18
-    print(f"{_bold(f'Room: {room}')}  ({len(tiles)} tiles)")
+    conf_w = 5
+    q_max = tw - conf_w - src_w - 14
+    if q_max < 20:
+        q_max = 60
+
+    print(f"{bold(f'Room: {room}')}  ({len(tiles)} tiles)")
     print()
     for i, t in enumerate(tiles):
         conf = t.get("confidence", 0.0)
         source = (t.get("source", "") or "")[:src_w]
-        q = (t.get("question", "") or "").strip()
-        # Truncate question to terminal width minus fixed columns
-        term_w = _term_width()
-        q_max = term_w - conf_w - src_w - 12
-        if q_max < 10:
-            q_max = 60
-        q_display = q[:q_max]
-        if len(q) > q_max:
-            q_display += "…"
-
-        conf_color = _color_confidence(conf)
-        conf_str = f"{conf_color}{conf:.2f}{_COLORS['RESET']}"
-        print(f"  [{i:3d}] {conf_str}  {_dim(source):{src_w}s}  {q_display}")
+        q = (t.get("question", "") or "").strip()[:q_max]
+        if len(q) >= q_max:
+            q += "…"
+        ccolor = confidence_color(conf)
+        conf_str = f"{ccolor}{conf:.2f}{_RESET}"
+        print(f"  [{i:3d}] {conf_str}  {dim(source):{src_w}s}  {q}")
 
 
-def _term_width():
-    """Get terminal width, default to 100."""
-    try:
-        import shutil
-        return shutil.get_terminal_size((100, 24)).columns
-    except Exception:
-        return 100
-
-
-def cmd_canon(args):
+def cmd_canon(args: List[str]) -> None:
     """Top N highest-confidence tiles from a room."""
     if not args:
-        print("Usage: ft canon <room> [N]", file=sys.stderr)
+        print(f"Usage: ft canon <room> [N]", file=sys.stderr)
         sys.exit(1)
 
     room = args[0]
@@ -354,43 +626,48 @@ def cmd_canon(args):
         try:
             n = int(args[1])
         except ValueError:
-            print(f"Error: N must be a number, got '{args[1]}'", file=sys.stderr)
+            print(f"{red('Error')}: N must be a number, got '{args[1]}'", file=sys.stderr)
             sys.exit(1)
 
-    tiles = _fetch_room(room, limit=200)
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=200)
     if not tiles:
+        print(f"{yellow('Info')}: room '{room}' has no tiles", file=sys.stderr)
         return
 
-    # Sort by confidence descending
     sorted_tiles = sorted(tiles, key=lambda t: -(t.get("confidence", 0) or 0))
     top = sorted_tiles[:n]
 
-    print(f"{_bold(f'Top {len(top)} of {len(tiles)} tiles in {room}')}")
-    print()
-
-    # Header
-    term_w = _term_width()
+    tw = _terminal_width()
     conf_w = 6
     src_w = 18
-    q_max = term_w - conf_w - src_w - 12
-    if q_max < 10:
+    q_max = tw - conf_w - src_w - 14
+    if q_max < 20:
         q_max = 60
 
+    print(f"{bold(f'Top {len(top)} of {len(tiles)} tiles in {room}')}")
+    print()
     print(f"  {'#':>3}  {'CONF':>{conf_w}s}  {'SOURCE':{src_w}s}  QUESTION")
-    print(f"  {'---':>3s}  {'------':>{conf_w}s}  {'------------------':{src_w}s}  {'-------':>{q_max}s}")
+    print(f"  {'---':>3s}  {'------':>{conf_w}s}  {'------------------':{src_w}s}  "
+          f"{'-------':>{q_max}s}")
     for i, t in enumerate(top):
         conf = t.get("confidence", 0.0)
         source = (t.get("source", "") or "")[:src_w]
         q = (t.get("question", "") or "").strip()[:q_max]
-        conf_color = _color_confidence(conf)
-        conf_str = f"{conf_color}{conf:.3f}{_COLORS['RESET']}"
-        print(f"  [{i+1:>2d}] {conf_str}  {_dim(source):{src_w}s}  {q}")
+        ccolor = confidence_color(conf)
+        conf_str = f"{ccolor}{conf:.3f}{_RESET}"
+        print(f"  [{i+1:>2d}] {conf_str}  {dim(source):{src_w}s}  {q}")
 
 
-def cmd_contract(args):
-    """Contract two room tile sets through Fortran compute claw."""
+def cmd_contract(args: List[str]) -> None:
+    """Contract two room tile sets through Fortran compute claw.
+
+    Computes how many value-pairs between two rooms differ by more than
+    the given threshold. This is PLATO's primary similarity/dissimilarity
+    operation.
+    """
     if len(args) < 2:
-        print("Usage: ft contract <room_a> <room_b> [threshold]", file=sys.stderr)
+        print(f"Usage: ft contract <room_a> <room_b> [threshold]", file=sys.stderr)
         sys.exit(1)
 
     a_name, b_name = args[0], args[1]
@@ -399,91 +676,95 @@ def cmd_contract(args):
         try:
             threshold = int(args[2])
         except ValueError:
-            print(f"Error: threshold must be an integer, got '{args[2]}'", file=sys.stderr)
+            print(f"{red('Error')}: threshold must be an integer, got '{args[2]}'",
+                  file=sys.stderr)
             sys.exit(1)
 
-    # Fetch rooms
-    print(f"Fetching room '{a_name}'…")
-    tiles_a = _fetch_room(a_name, limit=200)
-    print(f"Fetching room '{b_name}'…")
-    tiles_b = _fetch_room(b_name, limit=200)
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    print(f"  Fetching room '{a_name}'...", end=" ", flush=True)
+    tiles_a = client.fetch_room(a_name, limit=200)
+    print(f"{green(f'{len(tiles_a)} tiles')}")
+    print(f"  Fetching room '{b_name}'...", end=" ", flush=True)
+    tiles_b = client.fetch_room(b_name, limit=200)
+    print(f"{green(f'{len(tiles_b)} tiles')}")
 
-    na, nb = len(tiles_a), len(tiles_b)
-    if na == 0 or nb == 0:
-        print(f"Error: one or both rooms are empty", file=sys.stderr)
+    if not tiles_a or not tiles_b:
+        print(f"{red('Error')}: one or both rooms are empty", file=sys.stderr)
         sys.exit(2)
 
-    # Extract hash values for contract (use _hash or generated)
-    vals_a = [int(t.get("_hash", "0")[:8], 16) % 0x7FFFFFFF for t in tiles_a]
-    vals_b = [int(t.get("_hash", "0")[:8], 16) % 0x7FFFFFFF for t in tiles_b]
+    vals_a = [_tile_hash(t) for t in tiles_a]
+    vals_b = [_tile_hash(t) for t in tiles_b]
+    na, nb = len(vals_a), len(vals_b)
 
-    payload = {
-        "room_a": vals_a,
-        "room_b": vals_b,
-        "na": na,
-        "nb": nb,
-        "threshold": threshold,
-    }
-    print(f"Contracting {na}×{nb} tiles, threshold={threshold}…")
-    r = _claw_post("/contract", payload)
+    # Try HTTP claw first, fall back to native
+    try:
+        payload = {
+            "room_a": vals_a, "room_b": vals_b,
+            "na": na, "nb": nb, "threshold": threshold,
+        }
+        r = _claw_post("/contract", payload)
+        nresult = r.get("nresult", 0)
+        results = r.get("results", [])
+    except (SystemExit, Exception):
+        claw = ComputeClaw()
+        nresult = claw.fortran.contract(vals_a, na, vals_b, nb, threshold)
+        results = [nresult]
 
-    nresult = r.get("nresult", 0)
-    results = r.get("results", [])
-    print(f"{_bold('Contract Results')}")
-    print(f"  Pairs above threshold: {_colorize(str(nresult), 'GREEN')}")
-
-    if results:
-        print(f"  First {min(10, len(results))} values: ", end="")
-        preview = ", ".join(str(v) for v in results[:10])
-        print(preview)
+    pairs_total = na * nb
+    pct = nresult / pairs_total * 100 if pairs_total > 0 else 0.0
+    print(f"  Result:   {green(str(nresult))} of {pairs_total} pairs ({pct:.1f}%) "
+          f"above threshold {threshold}")
+    if len(results) > 1:
+        print(f"  First 10: {', '.join(str(v) for v in results[:10])}")
 
 
-def cmd_gradient(args):
-    """Gradient across room tile history."""
+def cmd_gradient(args: List[str]) -> None:
+    """Absolute differences between consecutive tiles (gradient)."""
     if not args:
-        print("Usage: ft gradient <room>", file=sys.stderr)
+        print(f"Usage: ft gradient <room>", file=sys.stderr)
         sys.exit(1)
 
     room = args[0]
-    tiles = _fetch_room(room, limit=100)
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=100)
     if not tiles:
+        print(f"{yellow('Info')}: room '{room}' has no tiles", file=sys.stderr)
         return
 
-    # Extract signed hash from each question
-    vals = []
-    for t in tiles:
-        q = (t.get("question", "") or "").strip()
-        h = hash(q[:16]) & 0x7FFFFFFF
-        vals.append(h)
+    vals = [_question_hash(t) for t in tiles]
+    n = len(vals)
 
-    payload = {"tiles": vals, "n": len(vals)}
-    r = _claw_post("/gradient", payload)
-    gradients = r.get("gradients", [])
+    try:
+        payload = {"tiles": vals, "n": n}
+        r = _claw_post("/gradient", payload)
+        grads = r.get("gradients", [])
+    except (SystemExit, Exception):
+        claw = ComputeClaw()
+        grads = claw.fortran.gradient(vals, n)
 
-    print(f"{_bold(f'Gradient across {len(vals)} tiles in {room}')}")
+    print(f"{bold(f'Gradient across {n} tiles in {room}')}")
     print()
-    for i, g in enumerate(gradients[:10]):
+    for i, g in enumerate(grads[:10]):
         q = (tiles[i].get("question", "") or "").strip()[:50]
         if len(q) >= 50:
             q += "…"
-        # Color large deltas
         g_abs = abs(g)
         if g_abs > 1000000:
-            g_str = _colorize(f"{g:10d}", "RED")
+            g_str = red(f"{g:10d}")
         elif g_abs > 100000:
-            g_str = _colorize(f"{g:10d}", "YELLOW")
+            g_str = yellow(f"{g:10d}")
         else:
-            g_str = _colorize(f"{g:10d}", "DIM")
+            g_str = dim(f"{g:10d}")
         print(f"  [{i:3d}] Δ={g_str}  {q}")
 
-    if len(gradients) > 10:
-        print(f"  … and {len(gradients) - 10} more")
+    if n > 10:
+        print(f"  … and {n - 10} more values")
 
 
-def cmd_spline(args):
-    """Interpolate room state (mu: 0-1023)."""
+def cmd_spline(args: List[str]) -> None:
+    """Interpolate room state between before and after states (mu: 0-1023)."""
     if not args:
-        print("Usage: ft spline <room> <mu>", file=sys.stderr)
+        print(f"Usage: ft spline <room> <mu>", file=sys.stderr)
         sys.exit(1)
 
     room = args[0]
@@ -492,253 +773,415 @@ def cmd_spline(args):
         try:
             mu = int(args[1])
             if mu < 0 or mu > 1023:
-                print(f"Warning: mu should be 0-1023, got {mu}", file=sys.stderr)
+                print(f"{yellow('Warning')}: mu should be 0-1023, got {mu}", file=sys.stderr)
         except ValueError:
-            print(f"Error: mu must be an integer, got '{args[1]}'", file=sys.stderr)
+            print(f"{red('Error')}: mu must be an integer, got '{args[1]}'", file=sys.stderr)
             sys.exit(1)
 
-    tiles = _fetch_room(room, limit=50)
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=50)
     if not tiles:
         return
 
-    # Extract hash values for before, double for after
-    vals = []
-    for t in tiles:
-        q = (t.get("question", "") or "").strip()
-        h = hash(q[:16]) & 0x7FFFFFFF
-        vals.append(h)
+    vals = [_question_hash(t) for t in tiles]
+    n = len(vals)
 
-    payload = {
-        "before": vals,
-        "after": [v * 2 for v in vals],
-        "n": len(vals),
-        "mu": mu,
-    }
-    r = _claw_post("/spline", payload)
-    result = r.get("result", [])
+    try:
+        payload = {"before": vals, "after": [v * 2 for v in vals], "n": n, "mu": mu}
+        r = _claw_post("/spline", payload)
+        result = r.get("result", [])
+    except (SystemExit, Exception):
+        claw = ComputeClaw()
+        result = claw.fortran.spline(vals, [v * 2 for v in vals], n, mu)
 
-    print(f"{_bold(f'Spline {room}')}")
-    print(f"  mu={mu}/1023  |before|={len(vals)}  |result|={len(result)}")
+    print(f"{bold(f'Spline {room}')}")
+    print(f"  mu={mu}/1023  |before|={n}  |result|={len(result)}")
     if result:
         print(f"  First 5: {', '.join(str(v) for v in result[:5])}")
 
 
-def cmd_watch(args):
-    """Watch a room for new tiles, polling every N seconds."""
+def cmd_watch(args: List[str]) -> None:
+    """Poll a PLATO room for new tiles, printing them as they appear."""
     if not args:
-        print("Usage: ft watch <room> [interval]", file=sys.stderr)
+        print(f"Usage: ft watch <room> [interval]", file=sys.stderr)
         sys.exit(1)
 
     room = args[0]
-    interval = 10
+    interval = 10.0
     if len(args) > 1:
         try:
             interval = float(args[1])
             if interval < 0.5:
-                print("Warning: minimum interval is 0.5s, clamping", file=sys.stderr)
+                print(f"{yellow('Warning')}: minimum interval is 0.5s, clamping", file=sys.stderr)
                 interval = 0.5
         except ValueError:
-            print(f"Error: interval must be a number, got '{args[1]}'", file=sys.stderr)
+            print(f"{red('Error')}: interval must be a number, got '{args[1]}'",
+                  file=sys.stderr)
             sys.exit(1)
 
-    print(f"Watching room '{_bold(room)}' every {interval}s…")
-    print("Press Ctrl+C to stop.")
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    print(f"{bold('Watching')} room '{green(room)}' every {interval}s...  "
+          f"({dim('Ctrl+C to stop')})")
     print()
 
-    seen = set()
+    seen: set = set()
     try:
         while True:
-            tiles = _fetch_room(room, limit=200)
-            if tiles:
-                for t in tiles:
-                    tile_hash = t.get("_hash", "")
-                    if tile_hash and tile_hash not in seen:
-                        seen.add(tile_hash)
-                        conf = t.get("confidence", 0.0)
-                        q = (t.get("question", "") or "").strip()
-                        a = (t.get("answer", "") or "").strip()
-                        source = t.get("source", "?")
-                        now = time.strftime("%H:%M:%S")
-                        conf_color = _color_confidence(conf)
-                        print(f"{_dim(f'[{now}]')} {conf_color}{conf:.2f}{_COLORS['RESET']}  "
-                              f"{_dim(source):>12s}  {_bold(q)}")
-                        if a:
-                            # Print answer shortened
-                            a_short = a[:100].replace("\n", " ")
-                            if len(a) > 100:
-                                a_short += "…"
-                            print(f"           {_dim(a_short)}")
-                        print()
+            tiles = client.fetch_room(room, limit=200)
+            for t in tiles:
+                tile_hash = t.get("_hash", "")
+                if tile_hash and tile_hash not in seen:
+                    seen.add(tile_hash)
+                    conf = t.get("confidence", 0.0)
+                    q = (t.get("question", "") or "").strip()
+                    a = (t.get("answer", "") or "").strip()
+                    source = t.get("source", "?")
+                    now = time.strftime("%H:%M:%S")
+                    ccolor = confidence_color(conf)
+                    print(f"{dim(f'[{now}]')} {ccolor}{conf:.2f}{_RESET}  "
+                          f"{dim(source):>12s}  {bold(q)}")
+                    if a:
+                        a_short = a[:100].replace("\n", " ")
+                        if len(a) > 100:
+                            a_short += "…"
+                        print(f"           {dim(a_short)}")
+                    print()
             time.sleep(interval)
     except KeyboardInterrupt:
         print()
         print(f"Stopped. Seen {len(seen)} unique tiles.")
 
 
-def cmd_benchmarks(args):
-    """Run benchmarks: Fortran direct + Zig ABI."""
-    lib_f, lib_z = _load_libs()
+def cmd_bench(_args: List[str]) -> None:
+    """Run all benchmarks: Fortran direct + Zig ABI."""
+    claw = ComputeClaw()
+    fw = claw.fortran
+    zw = claw.zig
 
-    print(f"{_bold('Benchmarks')}")
+    print(f"{bold('Benchmarks')}")
+    print(f"{dim('Fortran library via ctypes')}")
     print()
 
     # ── Fortran contract ──
-    print(f"{_colorize('Fortran Contract', 'CYAN')}")
+    print(f"  {cyan('Fortran Contract')}")
     for na, nb in [(1000, 1000), (5000, 5000)]:
-        a = (ctypes.c_int32 * na)()
-        b = (ctypes.c_int32 * nb)()
-        for i in range(na):
-            a[i] = i * 1000
-        for i in range(nb):
-            b[i] = i * 1000 + 500
-        nr = ctypes.c_int32(0)
+        a = [i * 1000 for i in range(na)]
+        b = [i * 1000 + 500 for i in range(nb)]
         t0 = time.perf_counter()
-        lib_f.contract(a, na, b, nb, ctypes.c_int32(10000), ctypes.byref(nr))
+        nr = fw.contract(a, na, b, nb, 10000)
         dt = time.perf_counter() - t0
         rate = na * nb / dt / 1e6 if dt > 0 else 0
-        print(f"  Contract {na}×{nb}: {dt*1000:.1f}ms  {rate:.0f}M pairs/s   ({_bold(str(nr.value))} results)")
+        print(f"    Contract {na:>4}×{nb:<4}: {dt*1000:>7.1f}ms  "
+              f"{rate:>9.0f}M pairs/s   ({bold(str(nr))} results)")
 
     # ── Fortran gradient ──
     print()
-    print(f"{_colorize('Fortran Gradient', 'CYAN')}")
+    print(f"  {cyan('Fortran Gradient')}")
     for n in [10000, 100000]:
-        a = (ctypes.c_int32 * n)()
-        for i in range(n):
-            a[i] = i * 100
-        g = (ctypes.c_int32 * n)()
+        a = [i * 100 for i in range(n)]
         t0 = time.perf_counter()
-        lib_f.gradient(a, n, g)
+        g = fw.gradient(a, n)
         dt = time.perf_counter() - t0
         rate = n / dt / 1e6 if dt > 0 else 0
-        print(f"  Gradient {n}: {dt*1000:.3f}ms  {rate:.0f}M elem/s")
+        print(f"    Gradient {n:>6}: {dt*1000:>7.3f}ms  {rate:>9.0f}M elem/s")
+
+    # ── Fortran dot ──
+    print()
+    print(f"  {cyan('Fortran Dot')}")
+    for n in [1000, 10000]:
+        a = [i * 3 for i in range(n)]
+        b = [i * 7 for i in range(n)]
+        t0 = time.perf_counter()
+        r = fw.dot(a, b, n)
+        dt = time.perf_counter() - t0
+        rate = n / dt / 1e6 if dt > 0 else 0
+        print(f"    Dot {n:>6}: {dt*1000:>7.3f}ms  {rate:>9.0f}M elem/s  ({r})")
+
+    # ── Fortran window contract ──
+    print()
+    print(f"  {cyan('Fortran Window Contract')}")
+    for n in [500]:
+        ta = list(range(n))
+        a = [i * 1000 for i in range(n)]
+        tb = list(range(n))
+        b = [i * 1000 + 500 for i in range(n)]
+        t0 = time.perf_counter()
+        nr = fw.window_contract(ta, a, n, tb, b, n, 100, 10000)
+        dt = time.perf_counter() - t0
+        rate = n * n / dt / 1e6 if dt > 0 else 0
+        print(f"    Window {n:>4}×{n:<4}: {dt*1000:>7.1f}ms  {rate:>9.0f}M pairs/s  "
+              f"({bold(str(nr))} results)")
 
     # ── Zig contract ──
-    if lib_z:
+    if zw:
         print()
-        print(f"{_colorize('Zig Contract', 'CYAN')}")
+        print(f"  {cyan('Zig Contract')}")
         for n in [1000, 5000]:
-            a = (ctypes.c_int32 * n)()
-            b = (ctypes.c_int32 * n)()
-            for i in range(n):
-                a[i] = i * 1000
-                b[i] = i * 1000 + 500
+            a = [i * 1000 for i in range(n)]
+            b = [i * 1000 + 500 for i in range(n)]
             t0 = time.perf_counter()
-            nr = lib_z.ft_contract(a, n, b, n, 10000)
+            nr = zw.contract(a, n, b, n, 10000)
             dt = time.perf_counter() - t0
             rate = n * n / dt / 1e6 if dt > 0 else 0
-            print(f"  Zig contract {n}×{n}: {dt*1000:.1f}ms  {rate:.0f}M pairs/s   ({_bold(str(nr))} results)")
+            print(f"    Contract {n:>4}×{n:<4}: {dt*1000:>7.1f}ms  "
+                  f"{rate:>9.0f}M pairs/s   ({bold(str(nr))} results)")
+
+        # ── Zig dot ──
+        print()
+        print(f"  {cyan('Zig Dot')}")
+        for n in [1000, 10000]:
+            a = [i * 3 for i in range(n)]
+            b = [i * 7 for i in range(n)]
+            t0 = time.perf_counter()
+            r = zw.dot(a, b, n)
+            dt = time.perf_counter() - t0
+            rate = n / dt / 1e6 if dt > 0 else 0
+            print(f"    Dot {n:>6}: {dt*1000:>7.3f}ms  {rate:>9.0f}M elem/s  ({r})")
     else:
         print()
-        print(f"{_colorize('Zig Contract', 'YELLOW')}")
-        print(f"  libft_zig.so not found — skipping Zig benchmarks")
+        print(f"  {yellow('Zig — skipping (libft_zig.so not found)')}")
 
 
-def cmd_help(args):
-    """Comprehensive help (this text)."""
-    print(__doc__.strip())
+def cmd_zig(_args: List[str]) -> None:
+    """Run Zig-specific benchmarks (Zig ABI only)."""
+    claw = ComputeClaw()
+    if not claw.zig:
+        print(f"{red('Error')}: libft_zig.so not found — Zig benchmarks unavailable",
+              file=sys.stderr)
+        sys.exit(3)
 
-
-# ─── Command registry ────────────────────────────────────────────────
-
-def cmd_window_contract(args):
-    """Contract with time window. Usage: window-contract <room_a> <room_b> <window> [threshold]"""
-    if len(args) < 3: return print("Usage: ft window-contract <room_a> <room_b> <window> [threshold]")
-    import ctypes, time, urllib.request, json
-    a, b, w = args[0], args[1], int(args[2])
-    thr = int(args[3]) if len(args) > 3 else 100
-    try:
-        r = json.loads(urllib.request.urlopen(PLATO + "/status", timeout=5).read())
-        ta = r.get("rooms", {}).get(a, {}).get("tile_count", 0) or 10
-        tb = r.get("rooms", {}).get(b, {}).get("tile_count", 0) or 10
-        lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
-        lib.window_contract.argtypes = [ctypes.POINTER(ctypes.c_int32)]*2 + [ctypes.c_int32]*2 + [ctypes.POINTER(ctypes.c_int32)]*2 + [ctypes.c_int32]*2 + [ctypes.POINTER(ctypes.c_int32)]
-        na, nb = min(ta, 50), min(tb, 50)
-        va = (ctypes.c_int32 * na)(); ta_arr = (ctypes.c_int32 * na)()
-        vb = (ctypes.c_int32 * nb)(); tb_arr = (ctypes.c_int32 * nb)()
-        for i in range(na): ta_arr[i]=i; va[i]=i*1000
-        for i in range(nb): tb_arr[i]=i; vb[i]=i*1000+500
-        nr = ctypes.c_int32(0)
-        lib.window_contract(ta_arr, va, na, tb_arr, vb, nb, w, thr, ctypes.byref(nr))
-        print("Window contract {}x{} window={}: {} matches".format(na, nb, w, nr.value))
-    except Exception as e: print("Error: " + str(e))
-
-def cmd_recency_dot(args):
-    """Recency-weighted dot product. Usage: recency-dot <room>"""
-    if not args: return print("Usage: ft recency-dot <room>")
-    try:
-        import ctypes, urllib.request, json
-        r = json.loads(urllib.request.urlopen(PLATO + "/status", timeout=5).read())
-        n = r.get("rooms", {}).get(args[0], {}).get("tile_count", 0) or 5
-        n = min(n, 50)
-        lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
-        lib.recency_dot.argtypes = [ctypes.POINTER(ctypes.c_int32)]*4 + [ctypes.c_int32, ctypes.POINTER(ctypes.c_int64)]
-        a = (ctypes.c_int32 * n)(); ta = (ctypes.c_int32 * n)()
-        b = (ctypes.c_int32 * n)(); tb = (ctypes.c_int32 * n)()
-        for i in range(n): a[i]=i*100; ta[i]=i; b[i]=i*100+50; tb[i]=i+1
-        rd = ctypes.c_int64(0)
-        lib.recency_dot(a, ta, b, tb, n, ctypes.byref(rd))
-        print("Recency dot ({} entries): {}".format(n, rd.value))
-    except Exception as e: print("Error: " + str(e))
-
-def cmd_window_gradient(args):
-    """Smoothed gradient. Usage: window-gradient <room> [window]"""
-    if not args: return print("Usage: ft window-gradient <room> [window]")
-    import ctypes, urllib.request, json
-    n, w = 20, int(args[1]) if len(args) > 1 else 3
-    lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
-    lib.window_gradient.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
-    arr = (ctypes.c_int32 * n)(); res = (ctypes.c_int32 * n)()
-    for i in range(n): arr[i] = i*100
-    lib.window_gradient(arr, n, w, res)
-    print("Window gradient {} window={}: [{}, {}, {}...] (last={})".format(n, w, res[0], res[1], res[2], res[n-1]))
-COMMANDS = {
-    "plato": cmd_plato,
-    "physics": cmd_physics,
-    "cat": cmd_cat,
-    "canon": cmd_canon,
-    "contract": cmd_contract,
-    "gradient": cmd_gradient,
-    "spline": cmd_spline,
-    "watch": cmd_watch,
-    "benchmarks": cmd_benchmarks,
-    "bench": cmd_benchmarks,
-    "help": cmd_help,
-    "window_contract": cmd_window_contract,
-    "recency_dot": cmd_recency_dot,
-    "window_gradient": cmd_window_gradient,
-    "-h": cmd_help,
-    "--help": cmd_help,
-}
-
-
-def _usage():
-    """Print short usage and exit."""
-    print("Usage: ft <command> [args]")
+    zw = claw.zig
+    print(f"{bold('Zig Benchmarks')}")
     print()
-    print("Commands:")
-    for name in ["plato", "physics", "cat", "canon", "contract", "gradient", "spline", "watch", "benchmarks", "help"]:
-        fn = COMMANDS[name]
-        doc = (fn.__doc__ or "").strip().split("\n")[0]
-        print(f"  {name:<14s}  {doc}")
+
+    # ── Zig contract ──
+    print(f"  {cyan('Contract')}")
+    for n in [1000, 5000, 10000]:
+        a = [i * 1000 for i in range(n)]
+        b = [i * 1000 + 500 for i in range(n)]
+        t0 = time.perf_counter()
+        nr = zw.contract(a, n, b, n, 10000)
+        dt = time.perf_counter() - t0
+        rate = n * n / dt / 1e6 if dt > 0 else 0
+        print(f"    {n:>5}×{n:<5}: {dt*1000:>7.1f}ms  {rate:>9.0f}M pairs/s  "
+              f"({bold(str(nr))} results)")
+
+    # ── Zig dot ──
     print()
-    print("See 'ft help' for full documentation.")
-    sys.exit(1)
+    print(f"  {cyan('Dot')}")
+    for n in [1000, 10000, 100000]:
+        a = [i * 3 for i in range(n)]
+        b = [i * 7 for i in range(n)]
+        t0 = time.perf_counter()
+        r = zw.dot(a, b, n)
+        dt = time.perf_counter() - t0
+        rate = n / dt / 1e6 if dt > 0 else 0
+        print(f"    {n:>6}: {dt*1000:>7.3f}ms  {rate:>9.0f}M elem/s  ({r})")
+
+    # ── Zig physics ──
+    print()
+    print(f"  {cyan('Physics')}")
+    lat, flops, simd = zw.physics()
+    print(f"    Latency:  {green(f'{lat:.1f} ns')}")
+    print(f"    FLOPs:    {flops:.2e}")
+    print(f"    SIMD:     {cyan(f'{simd}-bit')}")
+
+    # ── Zig window contract ──
+    print()
+    print(f"  {cyan('Window Contract')}")
+    n = 500
+    ta = list(range(n))
+    a = [i * 1000 for i in range(n)]
+    tb = list(range(n))
+    b = [i * 1000 + 500 for i in range(n)]
+    t0 = time.perf_counter()
+    nr = zw.window_contract(ta, a, n, tb, b, n, 100, 10000)
+    dt = time.perf_counter() - t0
+    print(f"    {n}×{n} window=100: {dt*1000:.1f}ms  ({bold(str(nr))} results)")
 
 
-def main():
-    if len(sys.argv) < 2:
-        _usage()
+def cmd_window_contract(args: List[str]) -> None:
+    """Contract two arrays with a time-window constraint.
 
-    cmd = sys.argv[1].replace("-", "_")
-    fn = COMMANDS.get(cmd)
-    if not fn:
-        print(f"Unknown command: {cmd}", file=sys.stderr)
-        print(f"Available: {', '.join(k for k in sorted(COMMANDS) if not k.startswith('-'))}",
+    Only considers element pairs whose timestamps are within 'window'
+    of each other. Makes time a first-class dimension.
+    """
+    if len(args) < 3:
+        print(f"Usage: ft window-contract <room_a> <room_b> <window> [threshold]",
               file=sys.stderr)
         sys.exit(1)
 
+    a_name, b_name = args[0], args[1]
     try:
-        fn(sys.argv[2:])
+        window = int(args[2])
+    except ValueError:
+        print(f"{red('Error')}: window must be an integer, got '{args[2]}'", file=sys.stderr)
+        sys.exit(1)
+
+    threshold = 100
+    if len(args) > 3:
+        try:
+            threshold = int(args[3])
+        except ValueError:
+            print(f"{red('Error')}: threshold must be an integer, got '{args[3]}'",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles_a = client.fetch_room(a_name, limit=50)
+    tiles_b = client.fetch_room(b_name, limit=50)
+
+    if not tiles_a or not tiles_b:
+        print(f"{red('Error')}: one or both rooms are empty", file=sys.stderr)
+        sys.exit(2)
+
+    na, nb = len(tiles_a), len(tiles_b)
+    time_a = list(range(na))
+    vals_a = [_tile_hash(t) for t in tiles_a]
+    time_b = list(range(nb))
+    vals_b = [_tile_hash(t) for t in tiles_b]
+
+    claw = ComputeClaw()
+    nresult = claw.fortran.window_contract(
+        time_a, vals_a, na, time_b, vals_b, nb, window, threshold,
+    )
+
+    print(f"{bold('Window Contract Results')}")
+    print(f"  Rooms:        {a_name} ({na}) × {b_name} ({nb})")
+    print(f"  Window:       {window}")
+    print(f"  Threshold:    {threshold}")
+    print(f"  Pairs above:  {green(str(nresult))}")
+
+
+def cmd_recency_dot(args: List[str]) -> None:
+    """Recency-weighted dot product.
+
+    Each element's contribution to the dot product is weighted by
+    its recency: newer entries contribute more.
+    """
+    if not args:
+        print(f"Usage: ft recency-dot <room>", file=sys.stderr)
+        sys.exit(1)
+
+    room = args[0]
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=50)
+
+    if not tiles:
+        print(f"{yellow('Info')}: room '{room}' has no tiles", file=sys.stderr)
+        return
+
+    n = len(tiles)
+    time_a = list(range(n))
+    vals_a = [_tile_hash(t) for t in tiles]
+    time_b = list(range(n))
+    vals_b = [v * 2 for v in vals_a]
+
+    claw = ComputeClaw()
+    result = claw.fortran.recency_dot(vals_a, time_a, vals_b, time_b, n)
+
+    print(f"{bold('Recency-Weighted Dot Product')}")
+    print(f"  Room:        {room} ({n} tiles)")
+    print(f"  Result:      {green(str(result))}")
+
+
+def cmd_window_gradient(args: List[str]) -> None:
+    """Smoothed gradient over a sliding window.
+
+    Each position's value is the average gradient across a window
+    centered at that position. Smooths noise to reveal trends.
+    """
+    if not args:
+        print(f"Usage: ft window-gradient <room> [window]", file=sys.stderr)
+        sys.exit(1)
+
+    room = args[0]
+    win = 3
+    if len(args) > 1:
+        try:
+            win = int(args[1])
+            if win < 3:
+                win = 3
+        except ValueError:
+            print(f"{red('Error')}: window must be an integer, got '{args[1]}'",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    client = PlatoClient(_CONF.plato_url, _CONF.http_timeout)
+    tiles = client.fetch_room(room, limit=50)
+    if not tiles:
+        return
+
+    vals = [_question_hash(t) for t in tiles]
+    n = len(vals)
+
+    claw = ComputeClaw()
+    result = claw.fortran.window_gradient(vals, n, win)
+
+    print(f"{bold(f'Window Gradient {room}')}")
+    print(f"  Tiles:  {n}")
+    print(f"  Window: {win}")
+    print(f"  First values: "
+          f"{', '.join(str(v) for v in result[:min(10, len(result))])}")
+
+
+def cmd_help(_args: List[str]) -> None:
+    """Comprehensive help text."""
+    print(__doc__.strip())
+
+
+# ─── Command Registry ─────────────────────────────────────────────────────
+
+_COMMANDS: Dict[str, Dict[str, Any]] = {
+    "plato": {"fn": cmd_plato, "doc": "Server status"},
+    "physics": {"fn": cmd_physics, "doc": "Compute claw physics"},
+    "cat": {"fn": cmd_cat, "doc": "Read room tiles"},
+    "canon": {"fn": cmd_canon, "doc": "Top N tiles by confidence"},
+    "contract": {"fn": cmd_contract, "doc": "Contract two rooms"},
+    "gradient": {"fn": cmd_gradient, "doc": "Gradient across tiles"},
+    "spline": {"fn": cmd_spline, "doc": "Interpolate room state"},
+    "watch": {"fn": cmd_watch, "doc": "Watch for new tiles"},
+    "bench": {"fn": cmd_bench, "doc": "Run all benchmarks"},
+    "benchmarks": {"fn": cmd_bench, "doc": "Alias for bench"},
+    "zig": {"fn": cmd_zig, "doc": "Zig-specific benchmarks"},
+    "window-contract": {"fn": cmd_window_contract, "doc": "Temporal contract"},
+    "recency-dot": {"fn": cmd_recency_dot, "doc": "Recency-weighted dot product"},
+    "window-gradient": {"fn": cmd_window_gradient, "doc": "Smoothed gradient"},
+    "-h": {"fn": cmd_help, "doc": "Help"},
+    "--help": {"fn": cmd_help, "doc": "Help"},
+    "help": {"fn": cmd_help, "doc": "Comprehensive help"},
+}
+
+
+def _usage() -> None:
+    """Print short usage and exit."""
+    print(f"Usage: ft <command> [args]")
+    print()
+    print(f"Commands:")
+    for name, info in _COMMANDS.items():
+        if name.startswith("-") or name in ("benchmarks",):
+            continue
+        print(f"  {name:<16s}  {info['doc']}")
+    print()
+    print(f"See 'ft help' for full documentation.")
+    sys.exit(1)
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        _usage()
+
+    raw_cmd = sys.argv[1].replace("_", "-")
+    entry = _COMMANDS.get(raw_cmd)
+    if entry is None:
+        print(f"{red('Error')}: unknown command '{raw_cmd}'", file=sys.stderr)
+        cmds = ", ".join(k for k in sorted(_COMMANDS)
+                          if not k.startswith("-") and k != "benchmarks")
+        print(f"Available: {cmds}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        entry["fn"](sys.argv[2:])
     except KeyboardInterrupt:
         print()
         sys.exit(130)
@@ -746,4 +1189,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
