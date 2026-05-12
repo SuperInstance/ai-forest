@@ -1,0 +1,16 @@
+[Unit]
+Description=PLATO ↔ Git Real-Time Sync Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=PLATO_URL=http://localhost:8847
+Environment=PLATO_REPO_DIR=/var/plato-repos
+ExecStart=/usr/bin/python3 /tmp/ai-forest/plato_git_daemon.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
