@@ -219,4 +219,12 @@ The forest is not designed top-down. It grows:
   <em>The canopy doesn't grow the roots. The roots grow the canopy.</em>
   <br/>
   <em>PLATO is the mycelium. The agents are the trees.</em>
+
+---
+
+## The Stemcell
+
+Every specialist in the forest started as the same [**stemcell**](STEMCELL.md) — a minimal Fortran engine that contracts two arrays of 24-bit integers. It doesn't know what it will become. The bridge tells it through the shape of the tile batches it receives.
+
+**Any system with a Fortran compiler has a compute claw.** ARM64, x86, RISC-V, GPU, FPGA, WASM, bare metal — the compiler has been ported everywhere for 60 years. The stemcell never changes. The forest always grows.
 </div>
