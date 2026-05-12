@@ -1,0 +1,3 @@
+[console_scripts]
+ft = ft:main
+
