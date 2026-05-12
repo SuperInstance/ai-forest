@@ -1,0 +1,31 @@
+; FLUX Program: Telephone Game
+; Measures information drift across cooperative reconstruction
+
+; Seed the game with initial tile
+PLATO_READ source_room, 1, seed_tile
+
+; Run telephone chain
+; 0xF9 TELEPHONE seed, hops
+; Each hop: fragment → reconstruct → next agent
+; The drift between hop 0 and hop N = creativity metric
+TELEPHONE seed_tile, 5
+
+; Apply forgetting curve
+; 0xFE FORGET room, decay_rate
+; Ebbinghaus decay: confidence = initial * exp(-decay * time)
+; Older tiles lose confidence, recent tiles preserved
+FORGET source_room, 0.3
+
+; Compose with adjunction
+; 0xFC ADJOIN model_a, model_b
+; Returns combined Galois connection
+; Θ_total = f(Θ_a, Θ_b) via adjunction composition
+ADJOIN "ebbinghaus", "recency"
+ADJOIN "threshold", "window"
+
+; Reconcile all fragments
+RECONCILE fragment_all
+
+; Report results
+PLATO_WRITE results_room, "Telephone game complete. Drift measured."
+HALT

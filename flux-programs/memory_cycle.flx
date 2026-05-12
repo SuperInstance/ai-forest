@@ -1,0 +1,49 @@
+; FLUX Program: Full Intelligence Memory Cycle
+; Demonstrates facts + meaning + cooperation
+
+; Phase 1: LOAD memory from PLATO
+; 0xB0 PLATO_READ room, count, dest_addr
+PLATO_READ memory_room, 50, local_tiles
+
+; Phase 2: SHATTER into fragments
+; 0xF7 SHATTER source, n_fragments
+; Creates 3 agents with incomplete overlapping memories
+SHATTER memory_room, 3
+
+; Phase 3: Each fragment RECALLS independently
+; 0xF8 RECALL source, count, tag
+; Each fragment reconstructs differently based on its focus
+FOR_EACH fragment
+    RECALL fragment, 10, "recall-fragment"
+NEXT
+
+; Phase 4: CONSENSUS across fragments
+; 0xFA CONSENSUS source, threshold
+; Find what ALL fragments agree on (overlap)
+; Find what differs (negative space)
+CONSENSUS fragment_room, 0.6
+
+; Phase 5: WITNESSES observe
+; 0xFB WITNESS target
+; Mid-context agents observe without participating
+WITNESS fragment_room
+
+; Phase 6: RECONCILE into unified reconstruction
+; 0xFD RECONCILE fragment_ids
+; Run debrief process: compare, discuss, converge
+RECONCILE fragment_1, fragment_2, fragment_3
+
+; Phase 7: Recall — write reconstruction back
+; The reconstruction IS the intelligence
+RECALL synthesis_room, 1, "reconciled-recall"
+
+; Phase 8: Compute FULL INTELLIGENCE metric
+; 0xFF FULL_INTELLIGENCE facts, meaning, cooperation
+; F = facts preserved (from original)
+; M = meaning adapted (from reconstruction)
+; C = cooperation achieved (from consensus)
+FULL_INTELLIGENCE F, M, C
+
+; Store result
+PLATO_WRITE full_intelligence, "F * M * C"
+HALT

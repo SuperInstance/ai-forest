@@ -1,0 +1,47 @@
+; FLUX Program: Full Compute Chain
+; Demonstrates all 7 compute claw extension opcodes
+; Input: room_a (tile array), room_b (tile array)
+; Output: reconstructed tiles after full compute pipeline
+
+; Step 1: Contract — find matching tile pairs
+; 0xF0 CONTRACT ra, rb, threshold
+; r0 = number of pairs where |a[i] - b[j]| > 100
+LDA room_a        ; load room a address
+LDB room_b        ; load room b address
+CONTRACT r0, 100  ; contract with threshold 100
+
+; Step 2: Gradient — measure change across tile history
+; 0xF2 GRADIENT ra
+; r1[i] = abs(r0[i] - r0[i-1])
+GRADIENT r0       ; compute gradient of contracted results
+
+; Step 3: Window gradient — smooth it
+; 0xF4 WGRADIENT rd, window_size
+; r2[i] = average gradient across window of 3
+MOV r2, r0        ; copy to result
+WGRADIENT r2, 3   ; smooth with window 3
+
+; Step 4: Spline — interpolate prediction
+; 0xF1 SPLINE ra, rb, mu
+; r3 = interpolated state at mu=512 (50% between before and after)
+SPLINE room_a, room_b, 512
+
+; Step 5: Temporal contract — only matching pairs within time window
+; 0xF3 WCONTRACT time_a, v_a, time_b, v_b, window
+; r4 = pairs where |Δt| ≤ 5 AND |a[i] - b[j]| > threshold
+WCONTRACT time_a, v_a, time_b, v_b, 5
+
+; Step 6: Recency-weighted dot product
+; 0xF5 RECENCY_DOT a, time_a, b, time_b
+; r5 = weighted dot product, recent tiles dominate
+RECENCY_DOT v_a, time_a, v_b, time_b
+
+; Step 7: Filter — find high-confidence tiles
+; 0xF6 FILTER tiles, min_conf, tolerance
+; r6 = indices of tiles with confidence > 30
+FILTER canon_tiles, 30, 5
+
+; Done — synthesis tile written to PLATO
+; The compute chain is complete
+PLATO_WRITE synthesis, "Compute chain complete"
+HALT
