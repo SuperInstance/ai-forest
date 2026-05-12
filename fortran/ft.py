@@ -116,7 +116,7 @@ def cmd_bench(args):
 def cmd_zig(args):
     """Benchmark Zig compute path"""
     import time, ctypes
-    lib = ctypes.CDLL("/tmp/ai-forest/zig/libft_zig.so")
+    lib = ctypes.CDLL("/usr/local/lib/libft_zig.so")
     lib.ft_contract.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.c_int32]
     lib.ft_contract.restype = ctypes.c_int32
     for n in [1000, 5000]:

@@ -7,3 +7,4 @@ __pycache__/
 node_modules/
 dist/
 floor/floor
+zig/.zig-cache/
