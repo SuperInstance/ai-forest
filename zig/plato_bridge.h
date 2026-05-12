@@ -21,4 +21,15 @@ void filter_val(const int32_t* arr, int n, int32_t target, int32_t tolerance,
 
 void physics(float* latency_ns, float* flops, int32_t* simd_bits);
 
+
+void window_contract(const int32_t* time_a, const int32_t* a, int na,
+                     const int32_t* time_b, const int32_t* b, int nb,
+                     int32_t window, int32_t threshold, int32_t* nresult);
+
+void recency_dot(const int32_t* a, const int32_t* time_a,
+                 const int32_t* b, const int32_t* time_b,
+                 int n, int64_t* result);
+
+void window_gradient(const int32_t* arr, int n, int32_t window, int32_t* result);
+
 #endif
