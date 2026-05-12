@@ -72,6 +72,47 @@ Each language is an adjunction between the developer's intent and the hardware's
 
 The adjunction framework predicts: each language is optimal for the component where its θ (compression cost) matches the component's tolerance for overhead. Hot path (Fortran) needs maximum compression. Bridge layer (Zig) needs zero-runtime-overhead dispatch. Safety layer (Rust) needs maximum guarantees.
 
+
+### TypeScript (web ecosystem)
+- **Unique strength:** 3M+ npm packages. Every AI product has a TypeScript SDK. Runs in browser, server (Node), and edge (Deno, Bun). Type system catches integration errors at compile time.
+- **Cost:** Free. Largest package ecosystem on the planet.
+- **Best for:** PLATO web interfaces (plato-view.html, forest-view.html), API gateways, browser-based tile viewers, integrating with external AI products via their JS SDKs.
+- **Weakness:** Single-threaded event loop. Not for hot-path compute.
+- **When to use:** Anything that runs in a browser or connects to external APIs.
+- **Current in fleet:** plato-view.html, forest-view.html, FM's collective-recall-demo (599 lines), canopy API server.
+
+### Java (enterprise ecosystem)
+- **Unique strength:** Massive enterprise adoption. Every major AI/ML tool has a Java API (Hugging Face, TensorFlow, Spark MLlib). JVM performance is excellent for server-side processing. Android runs on Java/Kotlin.
+- **Cost:** Free. OpenJDK. Thousands of libraries.
+- **Best for:** Enterprise PLATO integration, Android apps, connecting to ML pipelines that have Java APIs, heavy server-side tile processing where JVM JIT optimization matters.
+- **Weakness:** Verbose. Memory overhead. Not for hot-path array compute.
+- **When to use:** When you need to integrate PLATO with enterprise AI/ML infrastructure that speaks Java.
+
+| Component | Current | Ideal | Why |
+|---|---|---|---|
+| **Web visualization** | TypeScript | **TypeScript** | Runs in browser. Connects to any AI product with a JS SDK. |
+| **Browser PLATO client** | HTML/JS | **TypeScript** | plato-view.html, forest-view.html — zero-install fleet visualization. |
+| **Mobile PLATO client** | None | **Kotlin/Java** | Android app for PLATO room browsing. |
+| **Enterprise integration** | None | **Java** | Connect PLATO to TensorFlow Serving, Spark MLlib, Hugging Face. |
+| **API gateway** | Python | **TypeScript (Node)** | Express/Next.js with 3M+ npm packages for AI integration. |
+
+## Revised Language Map
+
+```
+Frontend/Web:      TypeScript — plato-view, forest-view, ScummVM, collective-recall
+API Gateways:      TypeScript (Node) — canopy API, external AI integration
+Browser Compute:   WebAssembly (from Zig/C) — 24-bit tile decode in browser
+Mobile:            Kotlin/Java — Android PLATO client
+Edge/Sensors:      Go/C — file watchers, POSIX sockets
+Bridge Layer:      Zig — comptime dispatch, C ABI, FLUX opcodes
+Hot Path Compute:  Fortran — contract, seed cycle, gradient (21B/s)
+Constraint Safety: Rust — gate, temporal agent, verification
+Orchestration:     Python/Mojo — ft CLI, agent runtime, experiment control
+Enterprise:        Java — ML pipeline integration, TensorFlow Serving, Spark
+All connected by:  24-bit tile format through PLATO rooms
+```
+
+Every language has a place. Every ecosystem connects to the same PLATO rooms. The 24-bit tile is the universal neurotransmitter — TypeScript reads it in a browser, Fortran contracts it at 21B/s, Rust verifies its safety, Java integrates it with enterprise ML pipelines. Same tile, all languages, all connected.
 ## Recommendation
 
 Keep the current multi-language architecture. It's correct:
