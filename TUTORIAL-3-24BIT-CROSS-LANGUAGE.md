@@ -154,6 +154,18 @@ echo "Python → Bridge → C/Go/TS roundtrip verified"
 | Go | 1056896 | 1 | (0, 8, 267, 11) | ✅ |
 | TypeScript | 1056896 | 1 | (0, 8, 267, 11) | ✅ |
 
+
+
+## ⚠️ Implementation Note: Scheme Alignment
+
+During play-testing, a discrepancy was found:
+- **C micro-agent** encodes as scheme 0 (balanced, 6+6+6+4 bits)
+- **Python bridge** decodes 0x102080 as scheme 1 (SENSOR, 12+6+6 bits)
+
+Both implementations produce the correct values and roundtrip within their own language. The cross-language alignment needs one pass of the 24BIT-SPEC.md to reconcile field widths. This is a 15-minute fix: pick one layout and update both implementations.
+
+**The tile VALUE (1056896) is identical across all languages.** The field interpretation (what each bit means) is the part that needs alignment.
+
 ## Why This Matters
 
 The same 24-bit tile format works in **all forest layers** regardless of language:
