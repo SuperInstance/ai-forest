@@ -127,6 +127,25 @@ export fn ft_window_gradient(
     c.window_gradient(arr_ptr, n, window, result_ptr);
 }
 
+
+export fn ft_ring_write(tile: i32) void {
+    c.ring_write(tile);
+}
+
+export fn ft_ring_read(n: i32, result_ptr: [*]i32, n_read_ptr: *i32) void {
+    c.ring_read(n, result_ptr, n_read_ptr);
+}
+
+export fn ft_contract_ring(n_recent: i32, n_memory: i32, threshold: i32) i32 {
+    var nresult: i32 = 0;
+    c.contract_ring(n_recent, n_memory, threshold, &nresult);
+    return nresult;
+}
+
+export fn ft_ring_status(fill_pct: *f32, total: *i32) void {
+    c.ring_status(fill_pct, total);
+}
+
 export fn ft_physics(latency_ptr: *f32, flops_ptr: *f32, simd_ptr: *i32) void {
     c.physics(latency_ptr, flops_ptr, simd_ptr);
 }

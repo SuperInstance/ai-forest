@@ -32,4 +32,10 @@ void recency_dot(const int32_t* a, const int32_t* time_a,
 
 void window_gradient(const int32_t* arr, int n, int32_t window, int32_t* result);
 
+
+void ring_write(int32_t tile);
+void ring_read(int n, int32_t* result, int32_t* n_read);
+void contract_ring(int n_recent, int n_memory, int threshold, int32_t* nresult);
+void ring_status(float* fill_pct, int32_t* total);
+
 #endif
