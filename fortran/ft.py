@@ -639,6 +639,58 @@ def cmd_help(args):
 
 
 # ─── Command registry ────────────────────────────────────────────────
+
+def cmd_window_contract(args):
+    """Contract with time window. Usage: window-contract <room_a> <room_b> <window> [threshold]"""
+    if len(args) < 3: return print("Usage: ft window-contract <room_a> <room_b> <window> [threshold]")
+    import ctypes, time, urllib.request, json
+    a, b, w = args[0], args[1], int(args[2])
+    thr = int(args[3]) if len(args) > 3 else 100
+    try:
+        r = json.loads(urllib.request.urlopen(PLATO + "/status", timeout=5).read())
+        ta = r.get("rooms", {}).get(a, {}).get("tile_count", 0) or 10
+        tb = r.get("rooms", {}).get(b, {}).get("tile_count", 0) or 10
+        lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
+        lib.window_contract.argtypes = [ctypes.POINTER(ctypes.c_int32)]*2 + [ctypes.c_int32]*2 + [ctypes.POINTER(ctypes.c_int32)]*2 + [ctypes.c_int32]*2 + [ctypes.POINTER(ctypes.c_int32)]
+        na, nb = min(ta, 50), min(tb, 50)
+        va = (ctypes.c_int32 * na)(); ta_arr = (ctypes.c_int32 * na)()
+        vb = (ctypes.c_int32 * nb)(); tb_arr = (ctypes.c_int32 * nb)()
+        for i in range(na): ta_arr[i]=i; va[i]=i*1000
+        for i in range(nb): tb_arr[i]=i; vb[i]=i*1000+500
+        nr = ctypes.c_int32(0)
+        lib.window_contract(ta_arr, va, na, tb_arr, vb, nb, w, thr, ctypes.byref(nr))
+        print("Window contract {}x{} window={}: {} matches".format(na, nb, w, nr.value))
+    except Exception as e: print("Error: " + str(e))
+
+def cmd_recency_dot(args):
+    """Recency-weighted dot product. Usage: recency-dot <room>"""
+    if not args: return print("Usage: ft recency-dot <room>")
+    try:
+        import ctypes, urllib.request, json
+        r = json.loads(urllib.request.urlopen(PLATO + "/status", timeout=5).read())
+        n = r.get("rooms", {}).get(args[0], {}).get("tile_count", 0) or 5
+        n = min(n, 50)
+        lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
+        lib.recency_dot.argtypes = [ctypes.POINTER(ctypes.c_int32)]*4 + [ctypes.c_int32, ctypes.POINTER(ctypes.c_int64)]
+        a = (ctypes.c_int32 * n)(); ta = (ctypes.c_int32 * n)()
+        b = (ctypes.c_int32 * n)(); tb = (ctypes.c_int32 * n)()
+        for i in range(n): a[i]=i*100; ta[i]=i; b[i]=i*100+50; tb[i]=i+1
+        rd = ctypes.c_int64(0)
+        lib.recency_dot(a, ta, b, tb, n, ctypes.byref(rd))
+        print("Recency dot ({} entries): {}".format(n, rd.value))
+    except Exception as e: print("Error: " + str(e))
+
+def cmd_window_gradient(args):
+    """Smoothed gradient. Usage: window-gradient <room> [window]"""
+    if not args: return print("Usage: ft window-gradient <room> [window]")
+    import ctypes, urllib.request, json
+    n, w = 20, int(args[1]) if len(args) > 1 else 3
+    lib = ctypes.CDLL("/usr/local/lib/libplato_math.so")
+    lib.window_gradient.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+    arr = (ctypes.c_int32 * n)(); res = (ctypes.c_int32 * n)()
+    for i in range(n): arr[i] = i*100
+    lib.window_gradient(arr, n, w, res)
+    print("Window gradient {} window={}: [{}, {}, {}...] (last={})".format(n, w, res[0], res[1], res[2], res[n-1]))
 COMMANDS = {
     "plato": cmd_plato,
     "physics": cmd_physics,
@@ -651,6 +703,9 @@ COMMANDS = {
     "benchmarks": cmd_benchmarks,
     "bench": cmd_benchmarks,
     "help": cmd_help,
+    "window_contract": cmd_window_contract,
+    "recency_dot": cmd_recency_dot,
+    "window_gradient": cmd_window_gradient,
     "-h": cmd_help,
     "--help": cmd_help,
 }
@@ -674,7 +729,7 @@ def main():
     if len(sys.argv) < 2:
         _usage()
 
-    cmd = sys.argv[1]
+    cmd = sys.argv[1].replace("-", "_")
     fn = COMMANDS.get(cmd)
     if not fn:
         print(f"Unknown command: {cmd}", file=sys.stderr)
@@ -691,3 +746,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
