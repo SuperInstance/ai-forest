@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PLATO Knowledge Browser</title>
+<style>
+/* ─── Steampunk Hermit Crab Theme ─────────────────────────── */
+:root {
+    --bg: #0a0a14;
+    --surface: #111;
+    --surface-hover: #1a1a28;
+    --border: #222;
+    --text: #e0e0e0;
+    --text-secondary: #888;
+    --amber: #ffd700;
+    --amber-dim: #b8962c;
+    --success: #44ff88;
+    --warning: #ffaa00;
+    --error: #ff4444;
+    --accent: #c8a84e;
+    --card-radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.5;
+}
+
+/* ─── Layout ──────────────────────────────────────────────── */
+.app-container {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+header {
+    background: linear-gradient(135deg, #0d0d1a 0%, #151525 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+header h1 {
+    font-size: 20px;
+    color: var(--amber);
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+header h1 span {
+    color: var(--text-secondary);
+    font-weight: 300;
+}
+
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.live-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    transition: background 0.3s;
+}
+
+.live-dot.on {
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+.live-dot.off {
+    background: var(--text-secondary);
+}
+
+.live-info {
+    font-size: 11px;
+    color: var(--amber-dim);
+    margin-left: 4px;
+}
+
+input[type="text"] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: system-ui, sans-serif;
+    width: 200px;
+    outline: none;
+    transition: border 0.2s;
+}
+
+input[type="text"]:focus {
+    border-color: var(--amber);
+}
+
+.search-input {
+    width: 220px;
+}
+
+/* ─── Main ────────────────────────────────────────────────── */
+main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ─── Sidebar ─────────────────────────────────────────────── */
+.sidebar {
+    width: 280px;
+    min-width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+.sidebar-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.sidebar-header h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--amber-dim);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.room-count {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: monospace;
+}
+
+.room-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.room-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: all 0.15s;
+    font-size: 13px;
+}
+
+.room-item:hover {
+    background: var(--surface-hover);
+}
+
+.room-item.active {
+    background: var(--surface-hover);
+    border-left-color: var(--amber);
+}
+
+.room-name {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.room-tilecount {
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-left: 8px;
+    padding: 1px 6px;
+    background: var(--bg);
+    border-radius: 10px;
+}
+
+/* ─── Content ─────────────────────────────────────────────── */
+.content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.content-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 48px;
+}
+
+.content-header h2 {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--amber);
+}
+
+.content-header .tile-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: monospace;
+}
+
+.refresh-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.refresh-btn:hover {
+    border-color: var(--amber);
+    color: var(--amber);
+}
+
+.tile-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px;
+}
+
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 40px;
+}
+
+.empty-state h3 {
+    font-size: 18px;
+    color: var(--amber-dim);
+    margin-bottom: 12px;
+    font-weight: 400;
+}
+
+.empty-state p {
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.empty-state .symbol {
+    font-size: 48px;
+    margin-bottom: 20px;
+    opacity: 0.5;
+}
+
+/* ─── Tiles ───────────────────────────────────────────────── */
+.tile {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--card-radius);
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    transition: border-color 0.2s;
+}
+
+.tile:hover {
+    border-color: #333;
+}
+
+.tile-question {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 6px;
+    line-height: 1.4;
+}
+
+.tile-answer {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 8px;
+    white-space: pre-wrap;
+    font-family: system-ui, sans-serif;
+}
+
+.tile-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 11px;
+}
+
+.confidence-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.conf-high { background: rgba(68, 255, 136, 0.15); color: var(--success); }
+.conf-mid  { background: rgba(255, 170, 0, 0.15);  color: var(--warning); }
+.conf-low  { background: rgba(255, 68, 68, 0.15);  color: var(--error); }
+
+.tile-source {
+    color: var(--text-secondary);
+}
+
+.tile-timestamp {
+    color: #555;
+    font-family: monospace;
+    font-size: 10px;
+}
+
+.tile-hash {
+    color: #444;
+    font-family: monospace;
+    font-size: 10px;
+}
+
+.tile-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.tile-tag {
+    background: rgba(255, 215, 0, 0.1);
+    color: var(--amber-dim);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+}
+
+/* ─── Status bar ──────────────────────────────────────────── */
+.status-bar {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 6px 20px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: monospace;
+    display: flex;
+    justify-content: space-between;
+}
+
+.status-bar .status-ok { color: var(--success); }
+.status-bar .status-err { color: var(--error); }
+
+/* ─── Scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ─── Loading ─────────────────────────────────────────────── */
+.loading {
+    display: none;
+    text-align: center;
+    padding: 40px;
+    color: var(--text-secondary);
+}
+.loading.show { display: block; }
+
+.loading .spinner {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--amber);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 12px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ─── Responsive ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+    header {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 12px 16px;
+    }
+    .header-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    input[type="text"] { width: 100%; }
+    .search-input { width: 100%; }
+
+    main { flex-direction: column; }
+    .sidebar {
+        width: 100%;
+        min-width: unset;
+        max-height: 200px;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+    }
+    .content { height: calc(100vh - 340px); }
+}
+</style>
+</head>
+<body>
+<div class="app-container">
+
+<!-- ─── Header ─────────────────────────────────────────── -->
+<header>
+    <h1>🕸 PLATO <span>knowledge browser</span></h1>
+    <div class="header-controls">
+        <label class="live-indicator" title="Toggle live auto-refresh">
+            <span class="live-dot off" id="liveDot"></span>
+            <span>Live</span>
+            <span class="live-info" id="liveInfo">off</span>
+        </label>
+        <input type="text" class="search-input" id="searchInput"
+               placeholder="Filter tiles…" autocomplete="off">
+    </div>
+</header>
+
+<!-- ─── Main ───────────────────────────────────────────── -->
+<main>
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>Rooms</h2>
+            <span class="room-count" id="roomCount">0</span>
+        </div>
+        <div class="loading show" id="sidebarLoading">
+            <div class="spinner"></div>
+            <div>Loading rooms…</div>
+        </div>
+        <div class="room-list" id="roomList"></div>
+    </aside>
+
+    <!-- Content -->
+    <section class="content">
+        <div class="content-header">
+            <div>
+                <h2 id="roomTitle">Select a room</h2>
+                <span class="tile-info" id="tileInfo"></span>
+            </div>
+            <button class="refresh-btn" id="refreshBtn"
+                    onclick="loadCurrentRoom()">↻ Refresh</button>
+        </div>
+
+        <div class="loading" id="tileLoading">
+            <div class="spinner"></div>
+            <div>Loading tiles…</div>
+        </div>
+
+        <div class="empty-state" id="emptyState">
+            <div class="symbol">🐚</div>
+            <h3>Explore the PLATO archive</h3>
+            <p>Select a room from the sidebar to browse its knowledge tiles.<br>
+            Each tile holds a question, answer, and confidence score.</p>
+        </div>
+
+        <div class="tile-container" id="tileContainer"></div>
+    </section>
+</main>
+
+<!-- ─── Status bar ─────────────────────────────────────── -->
+<footer class="status-bar">
+    <span id="statusLeft">🟢 Ready</span>
+    <span id="statusRight"></span>
+</footer>
+
+</div>
+
+<script>
+// ─── Configuration ───────────────────────────────────────
+const PLATO_URL = 'http://localhost:8847';
+const REFRESH_INTERVAL = 10; // seconds for live mode
+
+// ─── State ───────────────────────────────────────────────
+let currentRoom = null;
+let allTiles = [];
+let liveInterval = null;
+let liveOn = false;
+let rooms = {};
+
+// ─── DOM refs ────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const roomList = $('roomList');
+const roomCount = $('roomCount');
+const roomTitle = $('roomTitle');
+const tileInfo = $('tileInfo');
+const tileContainer = $('tileContainer');
+const emptyState = $('emptyState');
+const searchInput = $('searchInput');
+const sidebarLoading = $('sidebarLoading');
+const tileLoading = $('tileLoading');
+const refreshBtn = $('refreshBtn');
+const liveDot = $('liveDot');
+const liveInfo = $('liveInfo');
+const statusLeft = $('statusLeft');
+const statusRight = $('statusRight');
+
+// ─── Utilities ───────────────────────────────────────────
+function setStatus(msg, ok) {
+    statusLeft.textContent = (ok ? '🟢 ' : '🔴 ') + msg;
+}
+
+function timeAgo(ts) {
+    if (!ts) return '?';
+    const d = new Date(ts);
+    const now = Date.now();
+    const diff = Math.floor((now - d.getTime()) / 1000);
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+}
+
+function formatTime(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleString();
+}
+
+function truncate(str, len) {
+    if (!str) return '';
+    return str.length > len ? str.slice(0, len) + '…' : str;
+}
+
+// ─── API ─────────────────────────────────────────────────
+async function fetchJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    return res.json();
+}
+
+async function fetchRooms() {
+    const data = await fetchJSON(`${PLATO_URL}/status`);
+    return data.rooms || {};
+}
+
+async function fetchTiles(room, limit) {
+    limit = limit || 50;
+    const data = await fetchJSON(`${PLATO_URL}/room/${encodeURIComponent(room)}?limit=${limit}`);
+    return data.tiles || [];
+}
+
+// ─── Room list ───────────────────────────────────────────
+async function loadRooms() {
+    sidebarLoading.classList.add('show');
+    try {
+        rooms = await fetchRooms();
+        renderRoomList();
+        roomCount.textContent = Object.keys(rooms).length;
+        setStatus(`${Object.keys(rooms).length} rooms loaded`, true);
+    } catch (e) {
+        setStatus('Failed to load rooms: ' + e.message, false);
+        roomList.innerHTML = `<div class="empty-state" style="padding:20px">
+            <p style="color:var(--error)">❌ Cannot connect to PLATO</p>
+            <p style="font-size:12px;margin-top:8px">Check that PLATO_URL is correct</p>
+        </div>`;
+    } finally {
+        sidebarLoading.classList.remove('show');
+    }
+}
+
+function renderRoomList() {
+    const entries = Object.entries(rooms).sort((a, b) =>
+        (b[1].tile_count || 0) - (a[1].tile_count || 0)
+    );
+    let html = '';
+    for (const [name, info] of entries) {
+        const tc = info.tile_count || 0;
+        const active = name === currentRoom ? ' active' : '';
+        html += `<div class="room-item${active}" data-room="${name.replace(/"/g, '&quot;')}"
+                      onclick="selectRoom('${name.replace(/'/g, "\\'")}')">
+            <span class="room-name">${escapeHtml(name)}</span>
+            <span class="room-tilecount">${tc}</span>
+        </div>`;
+    }
+    roomList.innerHTML = html;
+}
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+// ─── Room selection ──────────────────────────────────────
+async function selectRoom(name) {
+    currentRoom = name;
+    refreshBtn.disabled = true;
+
+    // Highlight active room
+    document.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
+    const activeEl = document.querySelector(`.room-item[data-room="${name}"]`);
+    if (activeEl) activeEl.classList.add('active');
+
+    roomTitle.textContent = '📖 ' + escapeHtml(name);
+    emptyState.style.display = 'none';
+    tileContainer.innerHTML = '';
+    tileLoading.classList.add('show');
+    tileInfo.textContent = '';
+
+    try {
+        allTiles = await fetchTiles(name, 200);
+        renderTiles();
+        tileInfo.textContent = `${allTiles.length} tiles`;
+        setStatus(`Loaded ${allTiles.length} tiles from ${name}`, true);
+    } catch (e) {
+        setStatus('Failed to load tiles: ' + e.message, false);
+        tileContainer.innerHTML = `<div class="empty-state">
+            <p style="color:var(--error)">❌ ${escapeHtml(e.message)}</p>
+        </div>`;
+    } finally {
+        tileLoading.classList.remove('show');
+        refreshBtn.disabled = false;
+    }
+}
+
+function loadCurrentRoom() {
+    if (currentRoom) selectRoom(currentRoom);
+}
+
+// ─── Tile rendering ──────────────────────────────────────
+function renderTiles() {
+    const query = (searchInput.value || '').toLowerCase().trim();
+    let tiles = allTiles;
+
+    if (query) {
+        tiles = tiles.filter(t => {
+            const q = (t.question || '').toLowerCase();
+            const a = (t.answer || '').toLowerCase();
+            return q.includes(query) || a.includes(query);
+        });
+        tileInfo.textContent = `${tiles.length} of ${allTiles.length} tiles`;
+    } else {
+        tileInfo.textContent = `${tiles.length} tiles`;
+    }
+
+    if (tiles.length === 0) {
+        tileContainer.innerHTML = `<div class="empty-state">
+            <div class="symbol">🔍</div>
+            <h3>${query ? 'No matching tiles' : 'No tiles'}</h3>
+            <p>${query ? 'Try a different search term.' : 'This room appears to be empty.'}</p>
+        </div>`;
+        return;
+    }
+
+    let html = '';
+    let i = 0;
+
+    // Show newest tiles first
+    tiles.reverse();
+
+    for (const t of tiles) {
+        const conf = t.confidence != null ? t.confidence : 0;
+        const confCat = conf >= 0.9 ? 'high' : conf >= 0.7 ? 'mid' : 'low';
+        const qText = t.question || '(no question)';
+        const aText = t.answer || '(no answer)';
+        const source = t.source || 'unknown';
+        const timestamp = t.provenance ? t.provenance.timestamp : null;
+        const tsStr = timestamp ? formatTime(timestamp * 1000) : '';
+        const hash = t._hash || '';
+        const tags = t.tags || [];
+
+        html += `<div class="tile">
+            <div class="tile-question">${escapeHtml(truncate(qText, 200))}</div>
+            <div class="tile-answer">${escapeHtml(truncate(aText, 500))}</div>
+            <div class="tile-meta">
+                <span class="confidence-badge conf-${confCat}">${conf.toFixed(2)}</span>
+                <span class="tile-source">${escapeHtml(source)}</span>
+                <span class="tile-timestamp">${escapeHtml(tsStr)}</span>
+                ${tags.length ? `<span class="tile-tags">${tags.map(tag =>
+                    `<span class="tile-tag">${escapeHtml(tag)}</span>`
+                ).join('')}</span>` : ''}
+                ${hash ? `<span class="tile-hash">${escapeHtml(hash.slice(0, 8))}</span>` : ''}
+            </div>
+        </div>`;
+        i++;
+    }
+    tileContainer.innerHTML = html;
+}
+
+// ─── Search ──────────────────────────────────────────────
+searchInput.addEventListener('input', () => {
+    if (currentRoom) renderTiles();
+});
+
+// ─── Live mode ───────────────────────────────────────────
+function toggleLive() {
+    liveOn = !liveOn;
+    if (liveOn) {
+        liveDot.className = 'live-dot on';
+        liveInfo.textContent = `every ${REFRESH_INTERVAL}s`;
+        startLive();
+    } else {
+        liveDot.className = 'live-dot off';
+        liveInfo.textContent = 'off';
+        stopLive();
+    }
+}
+
+function startLive() {
+    stopLive();
+    liveInterval = setInterval(() => {
+        if (currentRoom) {
+            fetchTiles(currentRoom, 200).then(tiles => {
+                allTiles = tiles;
+                renderTiles();
+                setStatus(`Auto-refreshed ${currentRoom}`, true);
+            }).catch(e => {
+                setStatus('Auto-refresh failed: ' + e.message, false);
+            });
+        }
+    }, REFRESH_INTERVAL * 1000);
+}
+
+function stopLive() {
+    if (liveInterval) {
+        clearInterval(liveInterval);
+        liveInterval = null;
+    }
+}
+
+document.querySelector('.live-indicator').addEventListener('click', toggleLive);
+
+// ─── Init ────────────────────────────────────────────────
+loadRooms();
+</script>
+</body>
+</html>
