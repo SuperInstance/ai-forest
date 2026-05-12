@@ -98,6 +98,35 @@ export fn ft_cache_stats() u32 {
 
 // ─── Physics ──────────────────────────────────────────────────────────────
 
+
+
+export fn ft_window_contract(
+    time_a_ptr: [*]const i32, a_ptr: [*]const i32, na: i32,
+    time_b_ptr: [*]const i32, b_ptr: [*]const i32, nb: i32,
+    window: i32, threshold: i32,
+) i32 {
+    var nresult: i32 = 0;
+    c.window_contract(time_a_ptr, a_ptr, na, time_b_ptr, b_ptr, nb, window, threshold, &nresult);
+    return nresult;
+}
+
+export fn ft_recency_dot(
+    a_ptr: [*]const i32, time_a_ptr: [*]const i32,
+    b_ptr: [*]const i32, time_b_ptr: [*]const i32,
+    n: i32,
+) i64 {
+    var result: i64 = 0;
+    c.recency_dot(a_ptr, time_a_ptr, b_ptr, time_b_ptr, n, &result);
+    return result;
+}
+
+export fn ft_window_gradient(
+    arr_ptr: [*]const i32, n: i32, window: i32,
+    result_ptr: [*]i32,
+) void {
+    c.window_gradient(arr_ptr, n, window, result_ptr);
+}
+
 export fn ft_physics(latency_ptr: *f32, flops_ptr: *f32, simd_ptr: *i32) void {
     c.physics(latency_ptr, flops_ptr, simd_ptr);
 }

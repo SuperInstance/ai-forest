@@ -92,6 +92,27 @@ class ClawHandler(BaseHTTPRequestHandler):
             sd = ctypes.c_int32(0)
             lib.physics(ctypes.byref(lat), ctypes.byref(fl), ctypes.byref(sd))
             self._json({"latency_ns": lat.value, "flops": fl.value, "simd_bits": sd.value})
+        elif p == "/window-contract":
+            lib.window_contract.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+            ta = self._read_body().get("time_a", []); a = self._read_body().get("a", [])
+            tb = self._read_body().get("time_b", []); b = self._read_body().get("b", [])
+            nresult = ctypes.c_int32(0)
+            lib.window_contract((ctypes.c_int32 * len(ta))(*ta), (ctypes.c_int32 * len(a))(*a), len(ta),
+                (ctypes.c_int32 * len(tb))(*tb), (ctypes.c_int32 * len(b))(*b), len(tb),
+                ctypes.c_int32(self._read_body().get("window", 100)), ctypes.c_int32(self._read_body().get("threshold", 100)),
+                ctypes.byref(nresult))
+            self._json({"nresult": nresult.value})
+        
+        elif p == "/window-gradient":
+            body = self._read_body()
+            arr = (ctypes.c_int32 * len(body.get("arr", [])))(*body.get("arr", []))
+            n = len(arr)
+            result = (ctypes.c_int32 * n)()
+            lib.window_gradient(arr, n, ctypes.c_int32(body.get("window", 3)), result)
+            self._json({"result": [result[i] for i in range(n)]})
+        
         else:
             self._json({"error": "not found"}, 404)
     
@@ -128,6 +149,27 @@ class ClawHandler(BaseHTTPRequestHandler):
             grads = (ctypes.c_int32 * n)()
             lib.gradient(tiles, n, grads)
             self._json({"gradients": [grads[i] for i in range(n)]})
+        
+        elif p == "/window-contract":
+            lib.window_contract.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+            ta = self._read_body().get("time_a", []); a = self._read_body().get("a", [])
+            tb = self._read_body().get("time_b", []); b = self._read_body().get("b", [])
+            nresult = ctypes.c_int32(0)
+            lib.window_contract((ctypes.c_int32 * len(ta))(*ta), (ctypes.c_int32 * len(a))(*a), len(ta),
+                (ctypes.c_int32 * len(tb))(*tb), (ctypes.c_int32 * len(b))(*b), len(tb),
+                ctypes.c_int32(self._read_body().get("window", 100)), ctypes.c_int32(self._read_body().get("threshold", 100)),
+                ctypes.byref(nresult))
+            self._json({"nresult": nresult.value})
+        
+        elif p == "/window-gradient":
+            body = self._read_body()
+            arr = (ctypes.c_int32 * len(body.get("arr", [])))(*body.get("arr", []))
+            n = len(arr)
+            result = (ctypes.c_int32 * n)()
+            lib.window_gradient(arr, n, ctypes.c_int32(body.get("window", 3)), result)
+            self._json({"result": [result[i] for i in range(n)]})
         
         else:
             self._json({"error": "not found"}, 404)

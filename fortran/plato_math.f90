@@ -149,4 +149,120 @@ contains
     simd_bits = 128
   end subroutine physics
 
+
+
+  ! ── WINDOW_CONTRACT: contract within a sliding time window
+  !
+  ! Like contract, but only considers elements where 
+  ! time_a(i) and time_b(j) are within 'window' of each other.
+  ! This makes time a first-class dimension in the compute layer.
+  !
+  ! time_a, time_b: arrays of timestamps (int32, orderable)
+  ! a, b: arrays of values (int32)
+  ! window: maximum time difference to consider (int32)
+
+  subroutine window_contract(time_a, a, na, time_b, b, nb, window, threshold, nresult) &
+       bind(c, name="window_contract")
+    integer(c_int32_t), intent(in)  :: time_a(na), a(na), time_b(nb), b(nb)
+    integer(c_int32_t), intent(in), value :: na, nb, window, threshold
+    integer(c_int32_t), intent(out) :: nresult
+
+    integer(c_int32_t) :: i, j, td
+
+    nresult = 0
+
+    !$omp parallel do reduction(+:nresult) private(j, td)
+    do i = 1, na
+       do j = 1, nb
+          td = abs(time_a(i) - time_b(j))
+          if (td <= window .and. abs(a(i) - b(j)) > threshold) then
+             nresult = nresult + 1
+          end if
+       end do
+    end do
+    !$omp end parallel do
+  end subroutine window_contract
+
+
+  ! ── WINDOW_GRADIENT: gradient over a sliding window
+  !
+  ! For each element at position i, compute the average delta
+  ! across a window of size w centered at i.
+  ! This smooths noise and reveals temporal trends.
+
+  subroutine window_gradient(arr, n, window, result) &
+       bind(c, name="window_gradient")
+    integer(c_int32_t), intent(in)  :: arr(n)
+    integer(c_int32_t), intent(in), value :: n, window
+    integer(c_int32_t), intent(out) :: result(n)
+
+    integer(c_int32_t) :: i, j, start_idx, end_idx, count
+    integer(c_int64_t) :: sum
+
+    result(1) = 0
+    if (n < 2) return
+
+    !$omp parallel do private(j, start_idx, end_idx, count, sum)
+    do i = 2, n
+       start_idx = max(2, i - window / 2)
+       end_idx = min(n, i + window / 2)
+       sum = 0
+       count = 0
+       do j = start_idx, end_idx
+          sum = sum + int(abs(arr(j) - arr(j-1)), c_int64_t)
+          count = count + 1
+       end do
+       if (count > 0) then
+          result(i) = int(sum / int(count, c_int64_t), c_int32_t)
+       else
+          result(i) = 0
+       end if
+    end do
+    !$omp end parallel do
+  end subroutine window_gradient
+
+
+  ! ── RECENCY_DOT: weighted dot product where weight = 1 / (1 + age)
+  !
+  ! Elements with smaller timestamps (more recent) get higher weight.
+  ! This makes the dot product time-aware.
+
+  subroutine recency_dot(a, time_a, b, time_b, n, result) &
+       bind(c, name="recency_dot")
+    integer(c_int32_t), intent(in)  :: a(n), time_a(n), b(n), time_b(n)
+    integer(c_int32_t), intent(in), value :: n
+    integer(c_int64_t), intent(out) :: result
+
+    integer(c_int32_t) :: i
+    integer(c_int64_t) :: sum, w, min_t, max_t
+
+    result = 0
+    if (n < 1) return
+
+    ! Find time range for normalization
+    min_t = huge(min_t); max_t = 0
+    do i = 1, n
+       if (time_a(i) < min_t) min_t = time_a(i)
+       if (time_b(i) < min_t) min_t = time_b(i)
+       if (time_a(i) > max_t) max_t = time_a(i)
+       if (time_b(i) > max_t) max_t = time_b(i)
+    end do
+
+    if (max_t <= min_t) then
+       ! All same time — plain dot product
+       do i = 1, n
+          result = result + int(a(i), c_int64_t) * int(b(i), c_int64_t)
+       end do
+       return
+    end if
+
+    sum = 0
+    do i = 1, n
+       ! Weight: 1.0 at most recent timestamp, approaches 0 at oldest
+       w = 1 + (max_t - min_t) / max(1, max_t - time_a(i) + 1)
+       sum = sum + int(a(i), c_int64_t) * int(b(i), c_int64_t) / w
+    end do
+    result = sum
+  end subroutine recency_dot
+
 end module plato_math
