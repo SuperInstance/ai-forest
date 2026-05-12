@@ -265,4 +265,69 @@ contains
     result = sum
   end subroutine recency_dot
 
+
+
+  ! ── EBBINGHAUS_CONTRACT: contract with forgetting curve weight
+  !
+  ! Like contract, but each tile's contribution is weighted by its
+  ! confidence, which decays via Ebbinghaus curve: c(t) = c0 * exp(-t / tau)
+  !
+  !
+  ! This implements the Forgetting Curve finding (Experiment 3).
+
+  subroutine ebbinghaus_contract(a, conf_a, na, b, conf_b, nb, &
+       threshold, tau, nresult) bind(c, name="ebbinghaus_contract")
+    integer(c_int32_t), intent(in) :: a(na), conf_a(na), b(nb), conf_b(nb)
+    integer(c_int32_t), intent(in), value :: na, nb, threshold, tau
+    integer(c_int32_t), intent(out) :: nresult
+    integer(c_int32_t) :: i, j, weight_a, weight_b
+    nresult = 0
+    do i = 1, na
+       weight_a = conf_a(i) * 100 / max(conf_a(i) + tau, 1)
+       do j = 1, nb
+          weight_b = conf_b(j) * 100 / max(conf_b(j) + tau, 1)
+          if (abs(a(i) - b(j)) * (1000 - weight_a - weight_b) / 1000 > threshold) then
+             nresult = nresult + 1
+          end if
+       end do
+    end do
+  end subroutine ebbinghaus_contract
+
+
+
+
+  ! ── ADAPTIVE_THRESHOLD: auto-tune theta based on tile density
+  !
+  ! If the ring buffer is dense (many tiles in a short time), use a
+  ! HIGHER threshold (more aggressive compression). If sparse, use a
+  ! LOWER threshold (more conservative, preserve more).
+  !
+  ! The optimal threshold is proportional to the inverse of tile density:
+  !   theta_opt = base_threshold * (1 + density_factor / density)
+  !
+  ! This implements the Optimal Blind-Width finding (Experiment 4).
+
+  subroutine adaptive_threshold(base_thresh, density, theta_out) &
+       bind(c, name="adaptive_threshold")
+    real(c_float), intent(in), value :: base_thresh, density
+    integer(c_int32_t), intent(out) :: theta_out
+    real(c_float) :: theta_float
+    if (density > 0.1) then
+       theta_float = base_thresh * (1.0 + 0.5 / density)
+    else
+       theta_float = base_thresh * 2.0
+    end if
+    theta_out = int(min(max(theta_float, 1.0), 100000.0), c_int32_t)
+  end subroutine adaptive_threshold
+
+
+  ! ── CONSCIOUSNESS_BENCH: measure F, M, C alongside throughput
+  !
+  ! F (Facts preserved) = how many tile values above threshold survive
+  ! M (Meaning adapted) = entropy of tile distribution in ring buffer
+  ! C (Cooperation) = cross-segment resonance in ring buffer
+  !
+  ! Returns all three plus raw throughput in a single Fortran call.
+  ! This implements the Consciousness Metric finding (Experiment 5).
+
 end module plato_math

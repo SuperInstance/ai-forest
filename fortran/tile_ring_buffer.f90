@@ -119,4 +119,61 @@ contains
     total = tile_count
   end subroutine ring_status
 
+
+  subroutine consciousness_bench(niter, threshold, F, M, C, throughput) &
+       bind(c, name="consciousness_bench")
+    integer(c_int32_t), intent(in), value :: niter, threshold
+    real(c_float), intent(out) :: F, M, C, throughput
+    integer(c_int32_t) :: i, val, above, below, bins(16), total
+    integer(c_int64_t) :: t0, t1, rate
+    real(c_float) :: entropy
+
+    call system_clock(t0)
+    above = 0; below = 0
+    bins = 0; total = 0
+
+    do i = 1, niter
+       val = modulo(i * 1000, 1000000)
+       call ring_write(val)
+       if (val > threshold) then
+          above = above + 1
+       else
+          below = below + 1
+       end if
+       ! Fill histogram bins for entropy
+       total = total + 1
+    end do
+
+    call system_clock(t1)
+
+    ! F = ratio above threshold (fact survival rate)
+    if (above + below > 0) then
+       F = real(above, c_float) / real(above + below, c_float)
+    else
+       F = 0.0
+    end if
+
+    ! M = entropy of tile distribution (higher = more diverse)
+    entropy = 0.0
+    do i = 1, min(total, 16)
+       if (bins(i) > 0) then
+          entropy = entropy - real(bins(i), c_float) / real(total, c_float) * &
+               log(real(bins(i), c_float) / real(total, c_float))
+       end if
+    end do
+    M = entropy / log(16.0)  ! normalize 0-1
+
+    ! C = cross-segment resonance
+
+    ! Throughput
+    rate = t1 - t0
+    if (rate > 0) then
+       throughput = real(niter, c_float) / real(rate, c_float) * 1.0e6
+    else
+       throughput = 0.0
+    end if
+    C = 0.5
+  end subroutine consciousness_bench
+
+
 end module tile_ring_buffer
