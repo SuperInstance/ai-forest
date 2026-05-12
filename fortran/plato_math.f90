@@ -1,255 +1,152 @@
-! Fortran Compute Claw — Matrix Operations for PLATO Room Tensors
+! PLATO Compute Claw — Native 32-bit Array Operations
 !
-! Loaded as a shared library by the Python mycelium bridge.
-! Each call is a tiny Fortran instance: contract, return, vanish.
+! Fortran knows integers and arrays. This code does what Fortran is optimized for:
+!   • Contiguous int32 arrays
+!   • Simple loops the compiler can auto-vectorize
+!   • OpenMP for parallel sections
+!   • Stride-1 memory access (column-major = contiguous)
 !
-! The 24-bit tile format for Fortran:
-!   INTEGER(c_int32_t) :: raw   ! 24-bit tile, stored in low 24 bits
-!   Pack 64M tiles into a 192MB array — one BLAS call on the whole batch.
+! No bit masking. No field extraction. No packing.
+! The values ARE the data. Fortran just does the math.
+!
+! Written for gfortran -O3 -fopenmp -march=native
 
 module plato_math
   use, intrinsic :: iso_c_binding
   implicit none
+contains
 
-  ! Tile batch — packed 24-bit integers
-  integer(c_int32_t), parameter :: MAX_TILES = 65536
-  integer(c_int32_t), parameter :: TILE_MASK = int(Z'00FFFFFF', c_int32_t)
-  integer(c_int32_t), parameter :: SCHEME_MASK = int(Z'00C00000', c_int32_t)
-
-  contains
-
-  ! ── Contract two rooms: Σ(room_a × room_b) for each paired tile
+  ! ── CONTRACT: count how many pairs are above threshold
   !
-  ! Called from Python via ctypes:
-  !   contract_tiles(room_a, na, room_b, nb, result, threshold)
+  ! Pure array operation. Takes two int32 arrays of length na and nb.
+  ! Returns the NUMBER of pairs where |a(i) - b(j)| > threshold.
+  ! Fortran auto-vectorizes the inner loop.
   !
-  ! Returns: for each tile in room_a, compute dot-product with each tile in room_b
-  !          if result > threshold, keep it (they're related)
-  !          result is same tile value with confidence boosted by overlap
-  !
-  ! This is the core PLATO tensor contraction. Called every time rooms connect.
+  ! The threshold is in units of int32 — not normalized.
+  ! A threshold of 100 means "pairs that differ by more than 100."
 
-  subroutine contract_tiles(room_a, na, room_b, nb, result, nresult, threshold) &
-       bind(c, name="contract_tiles")
-    integer(c_int32_t), intent(in)  :: room_a(na)
-    integer(c_int32_t), intent(in)  :: room_b(nb)
-    integer(c_int32_t), intent(in), value :: na, nb
-    integer(c_int32_t), intent(out) :: result(na * nb)
+  subroutine contract(a, na, b, nb, threshold, nresult) &
+       bind(c, name="contract")
+    integer(c_int32_t), intent(in)  :: a(na), b(nb)
+    integer(c_int32_t), intent(in), value :: na, nb, threshold
     integer(c_int32_t), intent(out) :: nresult
-    real(c_float), intent(in), value :: threshold
 
-    integer(c_int32_t) :: i, j, a_val, b_val, ca, ga, cb, gb, cr, gr, idx
-    real(c_float) :: sim
+    integer(c_int32_t) :: i, j
 
     nresult = 0
-    idx = 0
 
+    !$omp parallel do reduction(+:nresult) private(j)
     do i = 1, na
-       a_val = iand(room_a(i), TILE_MASK)
-       ca = iand(shiftr(a_val, 18), 63)
-       ga = iand(shiftr(a_val, 12), 63)
-
        do j = 1, nb
-          idx = idx + 1
-          b_val = iand(room_b(j), TILE_MASK)
-          cb = iand(shiftr(b_val, 18), 63)
-          gb = iand(shiftr(b_val, 12), 63)
-
-          sim = (real(ca, c_float) * real(cb, c_float) + real(ga, c_float) * real(gb, c_float)) / 8192.0
-
-          if (sim > threshold) then
+          if (abs(a(i) - b(j)) > threshold) then
              nresult = nresult + 1
-             cr = min(int(ca * sim + cb * (1.0 - sim), c_int32_t), 63)
-             gr = min(int(ga + gb / 2, c_int32_t), 63)
-             result(nresult) = ior(ior(shiftl(cr, 18), shiftl(gr, 12)), iand(a_val, 4095))
-             result(nresult) = iand(result(nresult), TILE_MASK)
           end if
        end do
-    end do
-  end subroutine contract_tiles
-
-
-  ! ── Spline interpolation between two room states
-  !
-  ! Given two room snapshots (before, after) at time t, compute the interpolated
-  ! state at t+δ. Each tile moves along the spline:
-  !   tile(t+δ) = (1-μ) × tile_before + μ × tile_after
-  ! where μ = δ / (max_time - t)
-
-  subroutine spline_interp(before, after, n, mu, result) &
-       bind(c, name="spline_interp")
-    integer(c_int32_t), intent(in)  :: before(*), after(*)
-    integer(c_int32_t), intent(in), value :: n
-    real(c_float), intent(in), value :: mu
-    integer(c_int32_t), intent(out) :: result(*)
-
-    integer(c_int32_t) :: i
-    real(c_float) :: conf_f, grad_f
-
-    do i = 1, n
-       conf_f = real(iand(shiftr(before(i), 18), 63), c_float) * (1.0 - mu) + &
-                real(iand(shiftr(after(i), 18), 63), c_float) * mu
-       grad_f = real(iand(shiftr(before(i), 12), 63), c_float) * (1.0 - mu) + &
-                real(iand(shiftr(after(i), 12), 63), c_float) * mu
-       result(i) = ior(iand(before(i), 4095), &
-            ior(shiftl(min(int(conf_f, c_int32_t), 63), 18), &
-                shiftl(min(int(grad_f, c_int32_t), 63), 12)))
-       ! ε + ctx preserved from before
-       result(i) = ior(result(i), iand(before(i), 4095))
-    end do
-  end subroutine spline_interp
-
-
-  ! ── Batch gradient: compute Δ between consecutive tiles
-  !
-  ! Returns the gradient array: the amount each tile changed from
-  ! the previous cycle. Used by the forest floor for drift detection.
-
-  subroutine batch_gradient(tiles, n, gradients) &
-       bind(c, name="batch_gradient")
-    integer(c_int32_t), intent(in)  :: tiles(*)
-    integer(c_int32_t), intent(in), value :: n
-    integer(c_int32_t), intent(out) :: gradients(*)
-
-    integer(c_int32_t) :: i
-
-    !$omp parallel do
-    do i = 2, n
-       gradients(i) = iand(abs(tiles(i) - tiles(i-1)), TILE_MASK)
     end do
     !$omp end parallel do
-    gradients(1) = 0  ! first tile has no predecessor
-  end subroutine batch_gradient
+  end subroutine contract
 
 
-  ! ── Physics report: tell the bridge how fast we are
+  ! ── DOT: weighted dot product between two arrays
   !
-  ! The library self-reports its performance characteristics.
-  ! This is the "assembly port declares its physics" principle.
+  ! For each paired element, compute a(i) * b(i), accumulate.
+  ! Used for: similarity scoring when caller provides aligned arrays.
 
-  subroutine get_physics(latency_ns, flops, simd_width) &
-       bind(c, name="get_physics")
-    real(c_float), intent(out) :: latency_ns
-    real(c_float), intent(out) :: flops
-    integer(c_int32_t), intent(out) :: simd_width
+  subroutine dot(a, b, n, result) &
+       bind(c, name="dot")
+    integer(c_int32_t), intent(in)  :: a(n), b(n)
+    integer(c_int32_t), intent(in), value :: n
+    integer(c_int64_t), intent(out) :: result
 
-    ! These are compile-time constants for this build.
-    ! On ARM64 NEON: 120-element registers
-    ! On x86 AVX-512: 512-bit = 16 single-precision floats at once
-    latency_ns = 12.0    ! 12ns average instruction latency
-    flops = 1.2e10       ! 12 GFLOPS (ARM64 NEON estimate)
-    simd_width = 16      ! 128-bit NEON registers on ARM64
-  end subroutine get_physics
+    integer(c_int32_t) :: i
+
+    result = 0
+    !$omp parallel do reduction(+:result)
+    do i = 1, n
+       result = result + int(a(i), c_int64_t) * int(b(i), c_int64_t)
+    end do
+    !$omp end parallel do
+  end subroutine dot
 
 
-  ! ── FILTER: return tiles where confidence >= min_conf AND gradient >= min_grad
+  ! ── SPLINE: linear interpolation between two arrays
   !
-  ! Used by: ftile grep — find tiles matching field criteria in batch
+  ! result(i) = before(i) + mu * (after(i) - before(i))
+  ! mu is an integer 0-1023 representing 0.0 to 1.0
 
-  subroutine tile_filter(tiles_in, n_in, min_conf, min_grad, tiles_out, n_out) &
-       bind(c, name="tile_filter")
-    integer(c_int32_t), intent(in)  :: tiles_in(*)
-    integer(c_int32_t), intent(in), value :: n_in, min_conf, min_grad
-    integer(c_int32_t), intent(out) :: tiles_out(*)
-    integer(c_int32_t), intent(out) :: n_out
+  subroutine spline(before, after, n, mu, result) &
+       bind(c, name="spline")
+    integer(c_int32_t), intent(in)  :: before(n), after(n)
+    integer(c_int32_t), intent(in), value :: n, mu
+    integer(c_int32_t), intent(out) :: result(n)
 
-    integer(c_int32_t) :: i, conf, grad, val
-    n_out = 0
+    integer(c_int32_t) :: i
+    integer(c_int64_t) :: diff
 
-    do i = 1, n_in
-       val = iand(tiles_in(i), TILE_MASK)
-       conf = iand(shiftr(val, 18), 63)
-       grad = iand(shiftr(val, 12), 63)
-       if (conf >= min_conf .and. grad >= min_grad) then
-          n_out = n_out + 1
-          tiles_out(n_out) = tiles_in(i)
+    do i = 1, n
+       diff = int(after(i) - before(i), c_int64_t) * int(mu, c_int64_t) / 1024
+       result(i) = before(i) + int(diff, c_int32_t)
+    end do
+  end subroutine spline
+
+
+  ! ── GRADIENT: absolute differences between consecutive elements
+  !
+  ! result(1) = 0
+  ! result(i) = abs(a(i) - a(i-1)) for i > 1
+
+  subroutine gradient(a, n, result) &
+       bind(c, name="gradient")
+    integer(c_int32_t), intent(in)  :: a(n)
+    integer(c_int32_t), intent(in), value :: n
+    integer(c_int32_t), intent(out) :: result(n)
+
+    integer(c_int32_t) :: i
+
+    result(1) = 0
+    !$omp parallel do
+    do i = 2, n
+       result(i) = abs(a(i) - a(i-1))
+    end do
+    !$omp end parallel do
+  end subroutine gradient
+
+
+  ! ── FILTER: return indices where abs(value - target) < tolerance
+  !
+  ! Used for: finding values within a range
+
+  subroutine filter_val(a, n, target, tolerance, indices, n_found) &
+       bind(c, name="filter_val")
+    integer(c_int32_t), intent(in)  :: a(n)
+    integer(c_int32_t), intent(in), value :: n, target, tolerance
+    integer(c_int32_t), intent(out) :: indices(n)
+    integer(c_int32_t), intent(out) :: n_found
+
+    integer(c_int32_t) :: i
+
+    n_found = 0
+    do i = 1, n
+       if (abs(a(i) - target) <= tolerance) then
+          n_found = n_found + 1
+          indices(n_found) = i
        end if
     end do
-  end subroutine tile_filter
+  end subroutine filter_val
 
 
-  ! ── MERGE: combine two tile arrays, keep higher confidence on conflict
+  ! ── PHYSICS: self-report compiler-visible performance characteristics
   !
-  ! Used by: ftile merge — merge two room snapshots
+  ! These are compile-time constants. The bridge reads them once at startup.
 
-  subroutine tile_merge(tiles_a, na, tiles_b, nb, result, n_result) &
-       bind(c, name="tile_merge")
-    integer(c_int32_t), intent(in)  :: tiles_a(*), tiles_b(*)
-    integer(c_int32_t), intent(in), value :: na, nb
-    integer(c_int32_t), intent(out) :: result(*)
-    integer(c_int32_t), intent(out) :: n_result
+  subroutine physics(latency_ns, flops, simd_bits) &
+       bind(c, name="physics")
+    real(c_float), intent(out) :: latency_ns, flops
+    integer(c_int32_t), intent(out) :: simd_bits
 
-    integer(c_int32_t) :: i, j, conf_a, conf_b, val_a, val_b, found
-    n_result = 0
+    latency_ns = 12.0
+    flops = 1.2e10
+    simd_bits = 128
+  end subroutine physics
 
-    ! Copy all from A
-    do i = 1, na
-       n_result = n_result + 1
-       result(n_result) = tiles_a(i)
-    end do
-
-    ! Add from B if not already present, or upgrade confidence
-    do i = 1, nb
-       val_b = iand(tiles_b(i), TILE_MASK)
-       conf_b = iand(shiftr(val_b, 18), 63)
-       found = 0
-
-       do j = 1, n_result
-          val_a = iand(result(j), TILE_MASK)
-          ! Match on lower 12 bits (eps + ctx = identity)
-          if (iand(val_a, 4095) == iand(val_b, 4095)) then
-             found = j
-             exit
-          end if
-       end do
-
-       if (found > 0) then
-          ! Upgrade confidence if B has higher
-          conf_a = iand(shiftr(iand(result(found), TILE_MASK), 18), 63)
-          if (conf_b > conf_a) then
-             result(found) = ior(iand(result(found), 4095), &
-                  ior(shiftl(int(conf_b, c_int32_t), 18), &
-                      iand(val_b, 261888)))  ! keep grad from B too
-          end if
-       else
-          n_result = n_result + 1
-          result(n_result) = tiles_b(i)
-       end if
-    end do
-  end subroutine tile_merge
-
-
-  ! ── CANON: extract top N tiles by confidence
-  !
-  ! Used by: ftile canon — find best tiles in a room
-
-  subroutine tile_canon(tiles_in, n_in, n_top, tiles_out, n_out) &
-       bind(c, name="tile_canon")
-    integer(c_int32_t), intent(in)  :: tiles_in(*)
-    integer(c_int32_t), intent(in), value :: n_in, n_top
-    integer(c_int32_t), intent(out) :: tiles_out(*)
-    integer(c_int32_t), intent(out) :: n_out
-
-    integer(c_int32_t) :: i, j, conf_i, conf_j, val_i, val_j, temp
-    integer(c_int32_t) :: indices(65536)  ! max tiles for sorting
-    n_out = min(n_in, n_top)
-
-    ! Simple selection sort by confidence (n is small for canon ops)
-    do i = 1, n_in
-       indices(i) = i
-    end do
-
-    do i = 1, n_out
-       do j = i + 1, n_in
-          conf_i = iand(shiftr(iand(tiles_in(indices(i)), TILE_MASK), 18), 63)
-          conf_j = iand(shiftr(iand(tiles_in(indices(j)), TILE_MASK), 18), 63)
-          if (conf_j > conf_i) then
-             temp = indices(i)
-             indices(i) = indices(j)
-             indices(j) = temp
-          end if
-       end do
-       tiles_out(i) = tiles_in(indices(i))
-    end do
-  end subroutine tile_canon
 end module plato_math

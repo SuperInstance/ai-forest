@@ -23,22 +23,22 @@ def load_fortran() -> Optional[ctypes.CDLL]:
         return None
     lib = ctypes.CDLL(FORT_LIB)
     
-    lib.contract_tiles.argtypes = [
+    lib.contract.argtypes = [
         ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
         ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
         ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
         ctypes.c_float,
     ]
-    lib.spline_interp.argtypes = [
+    lib.spline.argtypes = [
         ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
         ctypes.c_int32, ctypes.c_float,
         ctypes.POINTER(ctypes.c_int32),
     ]
-    lib.batch_gradient.argtypes = [
+    lib.gradient.argtypes = [
         ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
         ctypes.POINTER(ctypes.c_int32),
     ]
-    lib.get_physics.argtypes = [
+    lib.physics.argtypes = [
         ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
         ctypes.POINTER(ctypes.c_int32),
     ]
@@ -70,7 +70,7 @@ class ClawHandler(BaseHTTPRequestHandler):
             lat = ctypes.c_float(0)
             fl = ctypes.c_float(0)
             sd = ctypes.c_int32(0)
-            lib.get_physics(ctypes.byref(lat), ctypes.byref(fl), ctypes.byref(sd))
+            lib.physics(ctypes.byref(lat), ctypes.byref(fl), ctypes.byref(sd))
             self._json({
                 "service": "Fortran Compute Claw",
                 "port": PORT,
@@ -90,7 +90,7 @@ class ClawHandler(BaseHTTPRequestHandler):
             lat = ctypes.c_float(0)
             fl = ctypes.c_float(0)
             sd = ctypes.c_int32(0)
-            lib.get_physics(ctypes.byref(lat), ctypes.byref(fl), ctypes.byref(sd))
+            lib.physics(ctypes.byref(lat), ctypes.byref(fl), ctypes.byref(sd))
             self._json({"latency_ns": lat.value, "flops": fl.value, "simd_bits": sd.value})
         else:
             self._json({"error": "not found"}, 404)
@@ -107,7 +107,7 @@ class ClawHandler(BaseHTTPRequestHandler):
             thresh = ctypes.c_float(body.get("threshold", 0.3))
             result = (ctypes.c_int32 * (na * nb))()
             nresult = ctypes.c_int32(0)
-            lib.contract_tiles(a, na, b, nb, result, ctypes.byref(nresult), thresh)
+            lib.contract(a, na, b, nb, result, ctypes.byref(nresult), thresh)
             self._json({
                 "nresult": nresult.value,
                 "results": [result[i] for i in range(nresult.value)],
@@ -119,14 +119,14 @@ class ClawHandler(BaseHTTPRequestHandler):
             n = body.get("n", len(before))
             mu = ctypes.c_float(body.get("mu", 0.5))
             result = (ctypes.c_int32 * n)()
-            lib.spline_interp(before, after, n, mu, result)
+            lib.spline(before, after, n, mu, result)
             self._json({"result": [result[i] for i in range(n)]})
         
         elif p == "/gradient":
             tiles = make_tiles(body.get("tiles", []))
             n = body.get("n", len(tiles))
             grads = (ctypes.c_int32 * n)()
-            lib.batch_gradient(tiles, n, grads)
+            lib.gradient(tiles, n, grads)
             self._json({"gradients": [grads[i] for i in range(n)]})
         
         else:

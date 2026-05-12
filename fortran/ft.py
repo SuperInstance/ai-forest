@@ -1,260 +1,126 @@
 #!/usr/bin/env python3
-"""ft — FLUX tile toolkit. Every tool reads/writes 24-bit tiles.
+"""ft — PLATO compute toolkit. Native int32, no bit packing.
 
-Built on the Fortran compute claw (:4081) and PLATO.
+Built on Fortran native array operations + PLATO rooms.
 
 Usage:
-  ft cat <room>           — Decode tiles from a PLATO room
-  ft grep <room> <field> <op> <val>  — Filter tiles by field
-  ft canon <room> [N]     — Top N highest-confidence tiles
-  ft merge <room_a> <room_b>  — Merge two rooms, deduplicate
-  ft contract <a> <b>     — Contract room A against room B
-  ft gradient <room>      — Delta stream from room history
-  ft plato                 — Show PLATO status
-  ft physics               — Show compute claw physics
+  ft plato               — PLATO server status
+  ft physics             — Compute claw physics  
+  ft contract <a> <b>    — Contract arrays through Fortran
+  ft gradient <room>     — Gradient across room tile history
+  ft spline <room> <mu>  — Interpolate room state forward
+  ft cat <room>          — Read room tiles as native ints
+  ft bench               — Benchmark Fortran compute paths
+  ft help                — This help
+
+Environment:
+  PLATO_URL     (default: http://localhost:8847)
+  CLAW_URL      (default: http://localhost:4081)
 """
 
-import ctypes
-import json
-import os
-import subprocess
-import sys
-import urllib.request
+import json, os, sys, time, urllib.request
+PLATO = os.environ.get("PLATO_URL", "http://localhost:8847")
+CLAW = os.environ.get("CLAW_URL", "http://localhost:4081")
 
-PLATO = "http://localhost:8847"
-CLAW = "http://localhost:4081"
-FORT_LIB = os.path.join(os.path.dirname(__file__), "libplato_math.so")
+def _fetch(path):
+    try:
+        with urllib.request.urlopen(f"{PLATO}{path}", timeout=10) as r:
+            return json.loads(r.read())
+    except: return {}
 
-def http_get(url):
-    with urllib.request.urlopen(url, timeout=10) as r:
-        return json.loads(r.read())
-
-def http_post(url, data):
-    req = urllib.request.Request(url, data=json.dumps(data).encode(),
+def _claw_post(endpoint, data):
+    req = urllib.request.Request(f"{CLAW}{endpoint}",
+        data=json.dumps(data).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
 
-def load_fortran():
-    """Direct Fortran .so access (no server needed for simple ops)"""
-    import ctypes
-    lib = ctypes.CDLL(FORT_LIB)
-    lib.tile_filter.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
-        ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32)]
-    lib.tile_canon.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
-        ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32)]
-    lib.batch_gradient.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
-        ctypes.POINTER(ctypes.c_int32)]
-    return lib
-
-def room_tiles(room, limit=50):
-    tiles = http_get(f"{PLATO}/room/{room}?limit={limit}")
-    return tiles.get("tiles", [])
-
-def decode_tile(val):
-    """Decode a 24-bit integer to fields."""
-    scheme = (val >> 22) & 0x3
-    conf = (val >> 18) & 0x3F
-    grad = (val >> 12) & 0x3F
-    eps = (val >> 6) & 0x3F
-    ctx = val & 0xF
-    return {"scheme": scheme, "conf": conf, "grad": grad, "eps": eps, "ctx": ctx,
-            "hex": f"0x{val:06X}", "raw": val}
-
-def make_tile(conf, grad, eps=0, ctx=0, scheme=0):
-    return (scheme << 22) | (min(conf, 63) << 18) | (min(grad, 63) << 12) | (min(eps, 63) << 6) | (min(ctx, 15))
-
-def cmd_cat(args):
-    """Decode tiles from a PLATO room"""
-    room = args[0]
-    tiles = room_tiles(room)
-    if not tiles:
-        print(f"No tiles in {room}/")
-        return
-    
-    lib = load_fortran()
-    vals = (ctypes.c_int32 * len(tiles))()
-    for i, t in enumerate(tiles):
-        vals[i] = hash(str(t.get("question","")[:16])) & 0xFFFFFF  # hash for display
-    
-    print(f"{'HEX':>10} {'CONF':>4} {'GRAD':>4} {'EPS':>4} {'CTX':>4}  QUESTION")
-    print("-" * 60)
-    for t in tiles[:30]:
-        h = abs(hash(str(t.get("question","")[:16])) & 0xFFFFFF)
-        d = decode_tile(h)
-        q = t.get("question","")[:40]
-        print(f"{d['hex']:>10} {d['conf']:>4} {d['grad']:>4} {d['eps']:>4} {d['ctx']:>4}  {q}")
-    if len(tiles) > 30:
-        print(f"... and {len(tiles)-30} more")
-
-def cmd_grep(args):
-    """Filter tiles by field value"""
-    room = args[0]
-    field = args[1]
-    op = args[2]
-    val = int(args[3])
-    
-    fields = {"conf": 18, "grad": 12, "eps": 6, "ctx": 0}
-    if field not in fields:
-        print(f"Unknown field: {field} (use conf, grad, eps, ctx)")
-        return
-    
-    tiles = room_tiles(room)
-    if not tiles:
-        return
-    
-    # Convert to ints for Fortran
-    ints = []
-    for t in tiles:
-        v = abs(hash(str(t.get("question","")[:16])) & 0xFFFFFF)
-        conf = abs(hash(str(t.get("answer","")[:16]))) % 64
-        grad = abs(hash(str(t.get("source","")[:8]))) % 64
-        v = make_tile(conf, grad)
-        ints.append(v)
-    
-    lib = load_fortran()
-    import ctypes
-    arr = (ctypes.c_int32 * len(ints))(*ints)
-    out = (ctypes.c_int32 * len(ints))()
-    
-    # Filter field is at bits N to N+5
-    if field == "conf":
-        lib.tile_filter(arr, len(ints), val, 0, out, ctypes.byref(ctypes.c_int32(0)))
-    elif field == "grad":
-        lib.tile_filter(arr, len(ints), 0, val, out, ctypes.byref(ctypes.c_int32(0)))
-    
-    print(f"{'HEX':>10} {'CONF':>4} {'GRAD':>4}  SOURCE")
-    print("-" * 40)
-    for i in range(len(ints)):
-        v = ints[i]
-        d = decode_tile(v)
-        if (field == "conf" and d[field] >= val) or (field == "grad" and d[field] >= val) or (field == "eps" and d[field] >= val):
-            print(f"{d['hex']:>10} {d['conf']:>4} {d['grad']:>4}  {tiles[i].get('source','?')[:20]}")
-
-def cmd_canon(args):
-    """Top N tiles by confidence"""
-    room = args[0]
-    n = int(args[1]) if len(args) > 1 else 10
-    
-    tiles = room_tiles(room)
-    if not tiles:
-        return
-    
-    import ctypes
-    lib = load_fortran()
-    
-    # Convert tiles to ints with hashed confidence
-    ints = []
-    for t in tiles:
-        conf = int(t.get("confidence", 0) * 60) + 2  # map 0-1 to 2-62
-        grad = abs(hash(str(t.get("question","")[:16]))) % 40 + 1
-        v = make_tile(conf, grad)
-        ints.append(v)
-    
-    arr = (ctypes.c_int32 * len(ints))(*ints)
-    out = (ctypes.c_int32 * n)()
-    nout = ctypes.c_int32(0)
-    lib.tile_canon(arr, len(ints), n, out, ctypes.byref(nout))
-    
-    print(f"{'RANK':>4} {'HEX':>10} {'CONF':>4} {'GRAD':>4}  QUESTION")
-    print("-" * 50)
-    for i in range(nout.value):
-        # Find which original tile this corresponds to
-        d = decode_tile(out[i])
-        # Search for matching confidence
-        for t in tiles:
-            tc = int(t.get("confidence", 0) * 60) + 2
-            if abs(tc - d['conf']) <= 1:
-                print(f"{i+1:>4} {d['hex']:>10} {d['conf']:>4} {d['grad']:>4}  {t.get('question','')[:40]}")
-                break
-
-def cmd_contract(args):
-    """Contract two rooms through the Fortran claw"""
-    a, b = args[0], args[1]
-    tA, tB = room_tiles(a), room_tiles(b)
-    
-    # Send to compute claw
-    result = http_post(f"{CLAW}/contract", {
-        "room_a": [abs(hash(str(t.get("question","")[:16])) & 0xFFFFFF) for t in tA],
-        "room_b": [abs(hash(str(t.get("question","")[:16])) & 0xFFFFFF) for t in tB],
-        "na": len(tA), "nb": len(tB),
-        "threshold": 0.3,
-    })
-    print(f"Contracted {a}({len(tA)}) × {b}({len(tB)}) = {result['nresult']} matches")
-
-def cmd_gradient(args):
-    """Gradient from room history"""
-    room = args[0]
-    tiles = room_tiles(room)
-    if len(tiles) < 2:
-        print("Need at least 2 tiles for gradient")
-        return
-    
-    lib = load_fortran()
-    import ctypes
-    vals = (ctypes.c_int32 * len(tiles))()
-    for i, t in enumerate(tiles):
-        vals[i] = abs(hash(str(t.get("question","")[:16])) & 0xFFFFFF)
-    grads = (ctypes.c_int32 * len(tiles))()
-    lib.batch_gradient(vals, len(tiles), grads)
-    
-    print(f"{'IDX':>4} {'HEX':>10} {'GRADIENT':>10}  QUESTION")
-    print("-" * 45)
-    for i in range(min(len(tiles), 20)):
-        print(f"{i:>4} {decode_tile(vals[i])['hex']:>10} {grads[i]:>10}  {tiles[i].get('question','')[:30]}")
-
 def cmd_plato(args):
-    """PLATO status"""
-    status = http_get(f"{PLATO}/status")
-    if "rooms" in status:
-        rooms = status["rooms"]
-        tiles = sum(r.get("tile_count", 0) for r in rooms.values())
-        print(f"PLATO: {len(rooms)} rooms, ~{tiles} tiles")
-        print(f"Gate: {status.get('gate_stats',{}).get('accepted',0)}a/{status.get('gate_stats',{}).get('rejected',0)}r")
+    s = _fetch("/status")
+    rooms = s.get("rooms", {})
+    tiles = sum(r.get("tile_count",0) for r in rooms.values())
+    print(f"PLATO: {len(rooms)} rooms, ~{tiles} tiles")
 
 def cmd_physics(args):
-    """Compute claw physics"""
-    phys = http_get(f"{CLAW}/physics")
-    if "latency_ns" in phys:
-        print(f"Fortran Claw: {phys['latency_ns']}ns latency, {phys['flops']:.1e} flops, {phys['simd_bits']}-bit SIMD")
+    try:
+        with urllib.request.urlopen(f"{CLAW}/physics", timeout=5) as r:
+            p = json.loads(r.read())
+            print(f"Claw: {p.get('latency_ns')}ns, {p.get('flops'):.1e} flops, {p.get('simd_bits')}-bit SIMD")
+    except:
+        print("Claw not reachable at", CLAW)
 
-def cmd_view(args):
-    """Open forest-view.html in browser"""
-    print("Open: http://147.224.38.131:4091/forest-view.html")
+def cmd_contract(args):
+    if len(args) < 2: return print("Usage: ft contract <room_a> <room_b>")
+    a_name, b_name = args[0], args[1]
+    rooms = _fetch("/status").get("rooms", {})
+    tiles_a = rooms.get(a_name, {}).get("tile_count", 0)
+    tiles_b = rooms.get(b_name, {}).get("tile_count", 0)
+    r = _claw_post("/contract", {"room_a": list(range(tiles_a)), "room_b": list(range(tiles_b)),
+        "na": tiles_a, "nb": tiles_b, "threshold": int(args[2]) if len(args) > 2 else 100})
+    print(f"Contracted {tiles_a}×{tiles_b}: {r.get('nresult',0)} pairs above threshold")
+
+def cmd_gradient(args):
+    if not args: return print("Usage: ft gradient <room>")
+    room = args[0]
+    tiles = _fetch(f"/room/{room}?limit=100").get("tiles", [])
+    vals = [hash(str(t.get("question",""))[:16]) & 0x7FFFFFFF for t in tiles]
+    r = _claw_post("/gradient", {"tiles": vals, "n": len(vals)})
+    print(f"Gradient across {len(vals)} tiles")
+    for i, g in enumerate(r.get("gradients",[])[:10]):
+        print(f"  [{i}] Δ={g:8d}  {tiles[i].get('question','')[:40]}")
+
+def cmd_spline(args):
+    if len(args) < 1: return print("Usage: ft spline <room> [mu]")
+    room, mu_s = args[0], args[1] if len(args) > 1 else "512"
+    mu = int(mu_s)
+    tiles = _fetch(f"/room/{room}?limit=50").get("tiles", [])
+    vals = [hash(str(t.get("question",""))[:16]) & 0x7FFFFFFF for t in tiles]
+    r = _claw_post("/spline", {"before": vals, "after": [v*2 for v in vals],
+        "n": len(vals), "mu": mu})
+    print(f"Spline {room} with mu={mu}/1024: {len(r.get('result',[]))} tiles interpolated")
+
+def cmd_cat(args):
+    if not args: return print("Usage: ft cat <room>")
+    room = args[0]
+    tiles = _fetch(f"/room/{room}?limit=30").get("tiles", [])
+    if not tiles: return print(f"No tiles in {room}/")
+    for i, t in enumerate(tiles):
+        q = t.get("question","")[:60]
+        val = hash(str(q)) & 0x7FFFFFFF
+        print(f"  [{i:3d}] 0x{val:08X} = {val:10d}  {q}")
+
+def cmd_bench(args):
+    import ctypes
+    lib = ctypes.CDLL("/tmp/ai-forest/fortran/libplato_math.so")
+    for fn, na, nb in [("contract", 1000, 1000), ("contract", 5000, 5000)]:
+        a = (ctypes.c_int32 * na)(); b = (ctypes.c_int32 * nb)()
+        for i in range(na): a[i] = i * 1000
+        for i in range(nb): b[i] = i * 1000 + 500
+        nr = ctypes.c_int32(0)
+        t0 = time.time()
+        if fn == "contract":
+            lib.contract(a, na, b, nb, ctypes.c_int32(10000), ctypes.byref(nr))
+        dt = time.time() - t0
+        print(f"  Contract {na}×{nb}: {dt*1000:.1f}ms ({na*nb/dt/1e6:.0f}M pairs/sec)")
+    
+    # Gradient
+    for n in [10000, 100000]:
+        a = (ctypes.c_int32 * n)()
+        for i in range(n): a[i] = i * 100
+        g = (ctypes.c_int32 * n)()
+        t0 = time.time()
+        lib.gradient(a, n, g)
+        dt = time.time() - t0
+        print(f"  Gradient {n}: {dt*1000:.3f}ms ({n/dt/1e6:.0f}M elem/sec)")
+
+COMMANDS = {k.replace("cmd_",""): v for k,v in locals().items() if k.startswith("cmd_")}
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(__doc__.strip())
-        sys.exit(1)
-    
-    cmd = sys.argv[1]
-    rest = sys.argv[2:]
-    
-    commands = {
-        "cat": cmd_cat,
-        "grep": cmd_grep,
-        "canon": cmd_canon,
-        "contract": cmd_contract,
-        "gradient": cmd_gradient,
-        "plato": cmd_plato,
-        "physics": cmd_physics,
-        "view": cmd_view,
-    }
-    
-    # Handle help
-    if cmd in ("-h", "--help", "help"):
-        print(__doc__.strip())
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h","--help","help"):
+        print(__doc__)
         sys.exit(0)
-    
-    if cmd not in commands:
-        print(f"Unknown command: {cmd}")
-        print(f"Available: {', '.join(commands.keys())}")
+    fn = COMMANDS.get(sys.argv[1])
+    if not fn:
+        print(f"Unknown: {sys.argv[1]}. Available: {', '.join(sorted(COMMANDS))}")
         sys.exit(1)
-    
-    try:
-        commands[cmd](rest)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    fn(sys.argv[2:])
