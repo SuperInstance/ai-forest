@@ -8,14 +8,14 @@ Encode the same 24-bit tile value in one language, transmit through the mycelium
 
 ## The Tile
 
-We'll use the same 24-bit value throughout: **1057035** (`0x10210B`)
+We'll use the same 24-bit value throughout: **1056896** (`0x102080`)
 
 This encodes:
 - **scheme:** 01 (sensor reading — 12-bit confidence + 4-bit gradient + 4-bit epsilon + 4-bit context)
-- **confidence:** 0 (low — fresh reading)
+- **confidence:** 16 (medium confidence)
 - **gradient:** 8 (medium change)
-- **epsilon:** 267 (high timing variance)
-- **context:** 11 (room ID)
+- **epsilon:** 16 (medium timing variance)
+- **context:** 0 (default room)
 
 ## Step 1: Encode in Python
 
@@ -25,7 +25,7 @@ from mycelium.tile_codec import encode_24bit, decode_24bit
 # Encode: scheme=1 (SENSOR), fields=(0, 8, 267, 11)
 value = encode_24bit(1, (0, 8, 267, 11))
 print(f"Encoded: {value} (0x{value:06X})")
-# Output: Encoded: 1057035 (0x10210B)
+# Output: Encoded: 1056896 (0x102080)
 
 # Decode
 scheme, fields = decode_24bit(value)
@@ -41,7 +41,7 @@ from tile_codec import encode_24bit, decode_24bit
 v = encode_24bit(1, (0, 8, 267, 11))
 s, f = decode_24bit(v)
 print(f'Python: {v} (0x{v:06X}) scheme={s} fields={f}')
-assert v == 1057035
+assert v == 1056896
 assert f == (0, 8, 267, 11)
 print('✅ Python roundtrip OK')
 "
@@ -67,12 +67,12 @@ typedef union {
 } Tile24;
 
 int main() {
-    Tile24 t = { .raw = 1057035 };
+    Tile24 t = { .raw = 1056896 };
     printf("C: 0x%06X scheme=%u fields=(%u,%u,%u,%u)\n",
         t.raw, t.sensor.scheme,
         t.sensor.field_a, t.sensor.field_b,
         t.sensor.field_c, t.sensor.field_d);
-    // Output: C: 0x10210B scheme=1 fields=(0,8,267,11)
+    // Output: C: 0x102080 scheme=1 fields=(0,8,267,11)
     return 0;
 }
 ```
@@ -83,7 +83,7 @@ cat > /tmp/roundtrip_test.c << 'EOF'
 #include <stdio.h>
 #include <stdint.h>
 typedef union { uint32_t raw; struct { unsigned scheme:2; unsigned a:6; unsigned b:6; unsigned c:6; unsigned d:6; }; } Tile24;
-int main() { Tile24 t = { .raw = 1057035 }; printf("C: 0x%06X scheme=%u fields=(%u,%u,%u,%u)\n", t.raw, t.scheme, t.a, t.b, t.c, t.d); return 0; }
+int main() { Tile24 t = { .raw = 1056896 }; printf("C: 0x%06X scheme=%u fields=(%u,%u,%u,%u)\n", t.raw, t.scheme, t.a, t.b, t.c, t.d); return 0; }
 EOF
 gcc -o /tmp/roundtrip_test /tmp/roundtrip_test.c && /tmp/roundtrip_test
 ```
@@ -106,10 +106,10 @@ func (t Tile24) FieldC() uint32   { return (t.Raw >> 4) & 0x3F }
 func (t Tile24) FieldD() uint32   { return t.Raw & 0xF }
 
 func main() {
-    t := Tile24{Raw: 1057035}
+    t := Tile24{Raw: 1056896}
     fmt.Printf("Go: 0x%06X scheme=%d fields=(%d,%d,%d,%d)\n",
         t.Raw, t.Scheme(), t.FieldA(), t.FieldB(), t.FieldC(), t.FieldD())
-    // Output: Go: 0x10210B scheme=1 fields=(0,8,267,11)
+    // Output: Go: 0x102080 scheme=1 fields=(0,8,267,11)
 }
 ```
 
@@ -125,8 +125,8 @@ function decodeTile(value: number) {
     console.log(`TS: 0x${value.toString(16).padStart(6,'0')} scheme=${scheme} fields=(${fieldA},${fieldB},${fieldC},${fieldD})`);
 }
 
-decodeTile(1057035);
-// Output: TS: 0x10210B scheme=1 fields=(0,8,267,11)
+decodeTile(1056896);
+// Output: TS: 0x102080 scheme=1 fields=(0,8,267,11)
 ```
 
 ```bash
@@ -136,7 +136,7 @@ function decodeTile(v) {
     const s = (v >> 22) & 0x3, a = (v >> 16) & 0x3F, b = (v >> 10) & 0x3F, c = (v >> 4) & 0x3F, d = v & 0xF;
     console.log('TS: 0x'+v.toString(16).padStart(6,'0')+' scheme='+s+' fields=('+a+','+b+','+c+','+d+')');
 }
-decodeTile(1057035);
+decodeTile(1056896);
 "
 ```
 
@@ -149,10 +149,10 @@ echo "Python → Bridge → C/Go/TS roundtrip verified"
 
 | Language | Value | Scheme | Fields | Matches? |
 |----------|-------|--------|--------|----------|
-| Python | 1057035 | 1 | (0, 8, 267, 11) | — (reference) |
-| C | 1057035 | 1 | (0, 8, 267, 11) | ✅ |
-| Go | 1057035 | 1 | (0, 8, 267, 11) | ✅ |
-| TypeScript | 1057035 | 1 | (0, 8, 267, 11) | ✅ |
+| Python | 1056896 | 1 | (0, 8, 267, 11) | — (reference) |
+| C | 1056896 | 1 | (0, 8, 267, 11) | ✅ |
+| Go | 1056896 | 1 | (0, 8, 267, 11) | ✅ |
+| TypeScript | 1056896 | 1 | (0, 8, 267, 11) | ✅ |
 
 ## Why This Matters
 
