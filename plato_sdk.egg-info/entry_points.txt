@@ -1,0 +1,3 @@
+[console_scripts]
+ft = plato_sdk:main
+

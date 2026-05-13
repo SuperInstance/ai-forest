@@ -90,7 +90,7 @@ contains
   function hash(val) result(h)
     integer(c_int32_t), intent(in) :: val
     integer(c_int32_t) :: h
-    h = modulo(val * 2654435761, TABLE_SIZE * 2)
+    h = modulo(abs(int(val,8)) * 2654435761_8, int(TABLE_SIZE,8) * 2)
   end function
 
 end module combined_memory

@@ -1,0 +1,10 @@
+Is fleet-experiments/ converged? Gradient 0 suggests stability
+Evolution: 'exp1_speedup.py cycle 1' → 'exp3_emergence.py cycle 2' — topic shift detected
+What changed in calibration/? Gradient 1565175817 suggests phase transition
+Evolution: 'α calibration results' → 'α calibration summary' — topic shift detected
+What changed in cooperation-experiments/? Gradient 992614664 suggests phase transition
+Evolution: 'Telephone: frag=0.3 hops=5' → 'Witness model via FM tiles' — topic shift detected
+What changed in novel-science/? Gradient 1531753134 suggests phase transition
+Evolution: 'Memory drift: synthesis' → 'Consciousness Metric' — topic shift detected
+What changed in swarm-insights/? Gradient 2016289774 suggests phase transition
+Evolution: 'Swarm: What does the convergence of 24-bit audio e' → 'Swarm 138: What's the next layer of the Common Spa' — topic shift detected
