@@ -135,6 +135,143 @@ static void subdivide_b(Triangle t, Triangle *out1, Triangle *out2) {
     out2->type = TYPE_A;
 }
 
+
+/* ─── Penrose P3 (Rhombus) Subdivision — Casey's cleaner approach ──────
+ *
+ * Uses std::complex for natural rotation/scaling of the aperiodic tiling.
+ * Thick and thin Robinson triangles subdivide by golden ratio.
+ * Growth: 10 → 20 → 50 → 130 → 340 → 890 (× phi^2 each iteration)
+ *
+ * Integration tips:
+ * - State Hashing: type + coordinates as agent memory ASLR seed
+ * - Concurrency: subdivide is embarrassingly parallel
+ * - Memory Mapping: each triangle → a code module or skill area
+ */
+
+typedef struct {
+    int type;       // 0 = Thick (Robinson A), 1 = Thin (Robinson B)
+    double ax, ay;  // vertex a as x,y pair (no complex dep in C)
+    double bx, by;
+    double cx, cy;
+} P3Triangle;
+
+/* ─── P3 Subdivide: one iteration of rhombus inflation ────────────────
+ *
+ * Each thick triangle produces 1 thick + 1 thin child.
+ * Each thin triangle produces 2 thin + 1 thick child.
+ * Returns number of triangles written to output (max 3 × n_input). */
+
+int p3_subdivide(const P3Triangle *input, int n_input,
+                 P3Triangle *output, int max_output) {
+    int n_out = 0;
+    
+    for (int i = 0; i < n_input && n_out + 3 <= max_output; i++) {
+        double ax = input[i].ax, ay = input[i].ay;
+        double bx = input[i].bx, by = input[i].by;
+        double cx = input[i].cx, cy = input[i].cy;
+        
+        if (input[i].type == 0) {
+            /* Thick (Robinson A): P = A + (B - A) / phi */
+            double px = ax + (bx - ax) / GOLDEN_RATIO;
+            double py = ay + (by - ay) / GOLDEN_RATIO;
+            
+            /* 1 thick: (C, P, B) */
+            output[n_out++] = (P3Triangle){0, cx, cy, px, py, bx, by};
+            /* 1 thin: (P, C, A) */
+            output[n_out++] = (P3Triangle){1, px, py, cx, cy, ax, ay};
+            
+        } else {
+            /* Thin (Robinson B): Q = B + (A - B) / phi, R = B + (C - B) / phi */
+            double qx = bx + (ax - bx) / GOLDEN_RATIO;
+            double qy = by + (ay - by) / GOLDEN_RATIO;
+            double rx = bx + (cx - bx) / GOLDEN_RATIO;
+            double ry = by + (cy - by) / GOLDEN_RATIO;
+            
+            /* 1 thin: (R, Q, B) */
+            output[n_out++] = (P3Triangle){1, rx, ry, qx, qy, bx, by};
+            /* 1 thick: (Q, R, A) */
+            output[n_out++] = (P3Triangle){0, qx, qy, rx, ry, ax, ay};
+            /* 1 thin: (A, Q, C) */
+            output[n_out++] = (P3Triangle){1, ax, ay, qx, qy, cx, cy};
+        }
+    }
+    return n_out;
+}
+
+/* ─── P3 Generate: complete P3 tiling from seed through N iterations ────
+ *
+ * Seed: 10 thick triangles in a decagon (Penrose "sun").
+ * After n iterations: ~10 × F(2n+1) triangles.
+ * All vertex positions are unique (aperiodic guarantee). */
+
+int p3_generate(int iterations, double *vertices_out, int max_verts,
+                int *tri_types_out, int max_tris) {
+    if (iterations < 0 || iterations > 12) return 0;
+    if (!vertices_out || max_verts < 10) return 0;
+    
+    /* Seed: 10 thick triangles in decagon */
+    P3Triangle mesh[MAX_VERTS];
+    int n_tris = 10;
+    
+    for (int i = 0; i < 10; i++) {
+        double angle1 = (2.0 * i - 1.0) * M_PI / 10.0;
+        double angle2 = (2.0 * i + 1.0) * M_PI / 10.0;
+        
+        if (i % 2 == 0) {
+            mesh[i] = (P3Triangle){0, 0, 0, cos(angle1), sin(angle1), cos(angle2), sin(angle2)};
+        } else {
+            mesh[i] = (P3Triangle){0, 0, 0, cos(angle2), sin(angle2), cos(angle1), sin(angle1)};
+        }
+    }
+    
+    /* Subdivide iteratively */
+    for (int iter = 0; iter < iterations; iter++) {
+        P3Triangle new_mesh[MAX_VERTS];
+        int n_new = p3_subdivide(mesh, n_tris, new_mesh, MAX_VERTS);
+        n_tris = n_new;
+        
+        /* Copy back */
+        for (int j = 0; j < n_tris; j++)
+            mesh[j] = new_mesh[j];
+    }
+    
+    /* Extract unique vertices */
+    int n_unique = 0;
+    double unique_x[MAX_VERTS], unique_y[MAX_VERTS];
+    
+    for (int i = 0; i < n_tris && n_unique < max_verts; i++) {
+        double verts[6] = {mesh[i].ax, mesh[i].ay, mesh[i].bx, mesh[i].by, mesh[i].cx, mesh[i].cy};
+        for (int j = 0; j < 3; j++) {
+            double vx = verts[j*2], vy = verts[j*2+1];
+            uint64_t id = penrose_vertex_id(vx, vy);
+            int found = 0;
+            for (int k = 0; k < n_unique; k++) {
+                if (penrose_vertex_id(unique_x[k], unique_y[k]) == id) {
+                    found = 1; break;
+                }
+            }
+            if (!found) {
+                unique_x[n_unique] = vx;
+                unique_y[n_unique] = vy;
+                n_unique++;
+            }
+        }
+    }
+    
+    /* Write output */
+    for (int i = 0; i < n_unique && i < max_verts; i++) {
+        vertices_out[i * 2] = unique_x[i];
+        vertices_out[i * 2 + 1] = unique_y[i];
+    }
+    
+    if (tri_types_out) {
+        for (int i = 0; i < n_tris && i < max_tris; i++)
+            tri_types_out[i] = mesh[i].type;
+    }
+    
+    return n_unique;
+}
+
 /* ─── Generate a complete Penrose tiling ─────────────────────────────────
  *
  * Starts with a "sun" configuration of 10 TYPE_A triangles arranged
@@ -295,6 +432,10 @@ extern "C" {
 int penrose_generate_c(int iterations, double *vertices, int max_verts,
                         int *sizes, int max_tris, int *n_tris) {
     return penrose_generate(iterations, vertices, max_verts, sizes, max_tris, n_tris);
+}
+
+int p3_generate_c(int iterations, double *vertices, int max_verts, int *tri_types, int max_tris) {
+    return p3_generate(iterations, vertices, max_verts, tri_types, max_tris);
 }
 
 uint64_t penrose_vertex_id_c(double x, double y) {
