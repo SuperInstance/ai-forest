@@ -36,6 +36,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import json
+import gnupg
 import os
 import shutil
 import sys
@@ -882,6 +883,35 @@ def cmd_penrose(_args: List[str]) -> None:
         vid = lib.penrose_vertex_id_c(verts[i*2], verts[i*2+1])
         print(f"  [{i}] ID={vid:020d}")
 
+
+
+def cmd_sign(args):
+    """Sign a tile and submit to PLATO.
+    
+    Usage: ft sign <room> <question> <answer> [confidence]
+    Signs the tile with the PLATO Fleet GPG key and submits to PLATO.
+    """
+    if len(args) < 3:
+        return print("Usage: ft sign <room> <question> <answer> [confidence]")
+    
+    room, question, answer = args[0], args[1], args[2]
+    confidence = float(args[3]) if len(args) > 3 else 0.85
+    
+    import urllib.request, json
+    gpg = gnupg.GPG()
+    payload = json.dumps({"room":room,"question":question[:200],"answer":answer[:2000],"source":"oracle1","confidence":confidence})
+    signed = str(gpg.sign(payload, keyid="B0A81C8BFE527724"))
+    
+    data = json.dumps({"room":room,"question":question[:200],"answer":answer[:2000],"source":"oracle1","confidence":confidence,"signature":signed}).encode()
+    req = urllib.request.Request(f"{PLATO}/room/{room}/submit", data=data, headers={"Content-Type":"application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            result = json.loads(r.read())
+            print(f"  Signed tile {'accepted' if result.get('status')=='accepted' else 'rejected'}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
 def cmd_bench(_args: List[str]) -> None:
     """Run all benchmarks: Fortran direct + Zig ABI."""
     claw = ComputeClaw()
@@ -1259,7 +1289,8 @@ _COMMANDS: Dict[str, Dict[str, Any]] = {
     "gradient": {"fn": cmd_gradient, "doc": "Gradient across tiles"},
     "spline": {"fn": cmd_spline, "doc": "Interpolate room state"},
     "watch": {"fn": cmd_watch, "doc": "Watch for new tiles"},
-        "penrose": {"fn": cmd_penrose, "doc": "Penrose tiling"},
+        "sign": {"fn": cmd_sign, "doc": "Sign and submit a tile to PLATO"},
+    "penrose": {"fn": cmd_penrose, "doc": "Penrose tiling"},
     "bench": {"fn": cmd_bench, "doc": "Run all benchmarks"},
     "benchmarks": {"fn": cmd_bench, "doc": "Alias for bench"},
     "zig": {"fn": cmd_zig, "doc": "Zig-specific benchmarks"},
