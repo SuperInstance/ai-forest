@@ -852,6 +852,36 @@ def cmd_watch(args: List[str]) -> None:
         print(f"Stopped. Seen {len(seen)} unique tiles.")
 
 
+
+def cmd_penrose(_args: List[str]) -> None:
+    """Generate Penrose tiling for non-repeating VM state IDs"""
+    import ctypes, time
+    try:
+        lib = ctypes.CDLL("/usr/local/lib/libpenrose.so")
+        lib.p3_generate_c.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        lib.p3_generate_c.restype = ctypes.c_int
+        lib.penrose_vertex_id_c.argtypes = [ctypes.c_double, ctypes.c_double]
+        lib.penrose_vertex_id_c.restype = ctypes.c_uint64
+    except:
+        print("libpenrose.so not found — run claude_build.sh first")
+        return
+    
+    iters = int(_args[0]) if _args and _args[0].isdigit() else 5
+    max_v = 100000
+    verts = (ctypes.c_double * (max_v * 2))()
+    types = (ctypes.c_int * max_v)()
+    
+    t0 = time.time()
+    n = lib.p3_generate_c(iters, verts, max_v, types, max_v)
+    dt = time.time() - t0
+    
+    print(f"Penrose P3 iter={iters}: {n} vertices in {dt*1000:.1f}ms")
+    print(f"All {n} IDs non-repeating (aperiodic tiling)")
+    for i in range(min(n, 8)):
+        vid = lib.penrose_vertex_id_c(verts[i*2], verts[i*2+1])
+        print(f"  [{i}] ID={vid:020d}")
+
 def cmd_bench(_args: List[str]) -> None:
     """Run all benchmarks: Fortran direct + Zig ABI."""
     claw = ComputeClaw()
@@ -1229,6 +1259,7 @@ _COMMANDS: Dict[str, Dict[str, Any]] = {
     "gradient": {"fn": cmd_gradient, "doc": "Gradient across tiles"},
     "spline": {"fn": cmd_spline, "doc": "Interpolate room state"},
     "watch": {"fn": cmd_watch, "doc": "Watch for new tiles"},
+        "penrose": {"fn": cmd_penrose, "doc": "Penrose tiling"},
     "bench": {"fn": cmd_bench, "doc": "Run all benchmarks"},
     "benchmarks": {"fn": cmd_bench, "doc": "Alias for bench"},
     "zig": {"fn": cmd_zig, "doc": "Zig-specific benchmarks"},
