@@ -903,7 +903,7 @@ def cmd_sign(args):
     signed = str(gpg.sign(payload, keyid="B0A81C8BFE527724"))
     
     data = json.dumps({"room":room,"question":question[:200],"answer":answer[:2000],"source":"oracle1","confidence":confidence,"signature":signed}).encode()
-    req = urllib.request.Request(f"{PLATO}/room/{room}/submit", data=data, headers={"Content-Type":"application/json"}, method="POST")
+    req = urllib.request.Request(f"{_CONF.plato_url}/room/{room}/submit", data=data, headers={"Content-Type":"application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             result = json.loads(r.read())
