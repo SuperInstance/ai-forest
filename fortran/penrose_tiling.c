@@ -445,3 +445,19 @@ uint64_t penrose_vertex_id_c(double x, double y) {
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Pre-computed P3 triangle counts for iterations 0-12 */
+static const int P3_TRI_COUNTS[] = {10, 20, 50, 130, 340, 890, 2330, 6100, 15970, 41810, 109460, 286570, 750250};
+
+int p3_triangle_count(int iterations) {
+    if (iterations < 0 || iterations > 12) return 0;
+    return P3_TRI_COUNTS[iterations];
+}
+
+#ifdef __cplusplus
+}
+#endif
