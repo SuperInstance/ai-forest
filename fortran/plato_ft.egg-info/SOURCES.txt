@@ -1,8 +1,0 @@
-README.md
-setup.py
-fortran/ft.py
-fortran/plato_ft.egg-info/PKG-INFO
-fortran/plato_ft.egg-info/SOURCES.txt
-fortran/plato_ft.egg-info/dependency_links.txt
-fortran/plato_ft.egg-info/entry_points.txt
-fortran/plato_ft.egg-info/top_level.txt
